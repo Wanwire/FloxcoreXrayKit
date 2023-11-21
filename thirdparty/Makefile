@@ -1,5 +1,5 @@
 
-XRAY = Xray-core-1.8.4
+XRAY = Xray-core-1.8.6
 PLATFORM ?= 
 
 default: libxray

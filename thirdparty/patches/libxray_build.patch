@@ -1,8 +1,8 @@
-diff --git a/thirdparty/Xray-core-1.8.4/Makefile b/thirdparty/Xray-core-1.8.4/Makefile
+diff --git a/thirdparty/Xray-core-1.8.6/Makefile b/thirdparty/Xray-core-1.8.6/Makefile
 new file mode 100644
 index 0000000..096a200
 --- /dev/null
-+++ b/thirdparty/Xray-core-1.8.4/Makefile
++++ b/thirdparty/Xray-core-1.8.6/Makefile
 @@ -0,0 +1,300 @@
 +# go/Makefile
 +
