@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version'
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: macOS-12
+
+    permissions:
+      # Give the default GITHUB_TOKEN write permission to commit and push the
+      # added or changed files to the repository
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go-1.21.x
+        uses: actions/setup-go@v4
+        with:
+          # Semantic version range syntax or exact version of Go
+          go-version: '1.21.x'
+        
+      - name: Build xcframework
+        run: make
+
+      - name: Archive xcframework
+        run: zip -r build/LibXray.xcframework.zip build/LibXray.xcframework
+
+      - name: Fix up Package.swift
+        run: |
+            export TEMP=`shasum -a 256 ./build/LibXray.xcframework.zip`
+            export CHECKSUM=${TEMP:0:64}
+            cd Templates
+            sed -i ".bak" "s/VERSION/${{ github.event.inputs.version }}/g" Package.template
+            sed -i ".bak" "s/CHECKSUM/${CHECKSUM}/g" Package.template
+            cd ..
+            cp ./Templates/Package.template Package.swift
+
+      - uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+            commit_message: XrayKit Release ${{ github.event.inputs.version }}
+            commit_user_name: GitHub Actions Bot
+            commit_user_email: thomas.veerman@wanwire.net
+            commit_author: Thomas Veerman <thomas.veerman@wanwire.net>
+            commit_options: '--no-verify --signoff'
+            tagging_message: ${{ github.event.inputs.version }}
+            file_pattern: 'Package.swift'
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          tag_name: ${{ github.event.inputs.version }}
+          files: ./build/LibXray.xcframework.zip

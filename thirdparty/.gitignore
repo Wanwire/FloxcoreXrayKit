@@ -1,0 +1,6 @@
+
+#Ignore operations on Xray as consequence of patching and building
+Xray-core*/Makefile*
+Xray-core*/out
+Xray-core*/.tmp
+Xray-core*/patched

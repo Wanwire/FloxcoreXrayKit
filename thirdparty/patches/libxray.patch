@@ -1,0 +1,128 @@
+diff --git a/thirdparty/Xray-core-1.8.4/main/commands/base/execute.go b/thirdparty/Xray-core-1.8.4/main/commands/base/execute.go
+index 2d18371..2abe30b 100644
+--- a/thirdparty/Xray-core-1.8.4/main/commands/base/execute.go
++++ b/thirdparty/Xray-core-1.8.4/main/commands/base/execute.go
+@@ -38,8 +38,7 @@ BigCmdLoop:
+ 				args = args[1:]
+ 				if len(args) == 0 {
+ 					PrintUsage(os.Stderr, bigCmd)
+-					SetExitStatus(2)
+-					Exit()
++					return
+ 				}
+ 				if args[0] == "help" {
+ 					// Accept 'go mod help' and 'go mod help foo' for 'go help mod' and 'go help mod foo'.
+@@ -62,7 +61,6 @@ BigCmdLoop:
+ 
+ 			buildCommandText(cmd)
+ 			cmd.Run(cmd, args)
+-			Exit()
+ 			return
+ 		}
+ 		helpArg := ""
+@@ -70,8 +68,7 @@ BigCmdLoop:
+ 			helpArg = " " + cmdName[:i]
+ 		}
+ 		fmt.Fprintf(os.Stderr, "%s %s: unknown command\nRun '%s help%s' for usage.\n", CommandEnv.Exec, cmdName, CommandEnv.Exec, helpArg)
+-		SetExitStatus(2)
+-		Exit()
++		return
+ 	}
+ }
+ 
+diff --git a/thirdparty/Xray-core-1.8.4/main/main.go b/thirdparty/Xray-core-1.8.4/main/main.go
+index e8824e6..02e772b 100644
+--- a/thirdparty/Xray-core-1.8.4/main/main.go
++++ b/thirdparty/Xray-core-1.8.4/main/main.go
+@@ -1,15 +1,43 @@
+ package main
+ 
+ import (
++        "C"
+ 	"flag"
+ 	"os"
++        "strings"
++        "unsafe"
+ 
+ 	"github.com/xtls/xray-core/main/commands/base"
+ 	_ "github.com/xtls/xray-core/main/distro/all"
+ )
+ 
++var signalledExit bool
++
+ func main() {
+-	os.Args = getArgsV4Compatible()
++}
++
++//export libxray_main
++func libxray_main(argc C.int, argv **C.char, envc C.int, envv **C.char) int {
++	signalledExit = false
++        argc_length := int(argc)
++        argv_slice := (*[1 << 30]*C.char)(unsafe.Pointer(argv))[:argc_length:argc_length]
++        args := make([]string, argc_length)
++        for i, s := range argv_slice {
++                args[i] = C.GoString(s)
++        }
++
++        // set xray environment vars such as "xray.location.asset=/path/to/dir/holding/geosite.dat"
++        envc_length := int(envc)
++        envv_slice := (*[1 << 30]*C.char)(unsafe.Pointer(envv))[:envc_length:envc_length]
++        for _, s := range envv_slice {
++                keyval := strings.Split(C.GoString(s), "=")
++                if len(keyval) == 2 {
++                        os.Setenv(keyval[0], keyval[1])
++                }
++        }
++
++        os.Args = args
++        os.Args = getArgsV4Compatible()
+ 
+ 	base.RootCommand.Long = "Xray is a platform for building proxies."
+ 	base.RootCommand.Commands = append(
+@@ -20,6 +48,10 @@ func main() {
+ 		base.RootCommand.Commands...,
+ 	)
+ 	base.Execute()
++	if signalledExit {
++		return 0
++	}
++	return 1
+ }
+ 
+ func getArgsV4Compatible() []string {
+diff --git a/thirdparty/Xray-core-1.8.4/main/run.go b/thirdparty/Xray-core-1.8.4/main/run.go
+index 9796770..8f3c597 100644
+--- a/thirdparty/Xray-core-1.8.4/main/run.go
++++ b/thirdparty/Xray-core-1.8.4/main/run.go
+@@ -66,17 +66,17 @@ func executeRun(cmd *base.Command, args []string) {
+ 	if err != nil {
+ 		fmt.Println("Failed to start:", err)
+ 		// Configuration error. Exit with a special value to prevent systemd from restarting.
+-		os.Exit(23)
++		return
+ 	}
+ 
+ 	if *test {
+ 		fmt.Println("Configuration OK.")
+-		os.Exit(0)
++		return
+ 	}
+ 
+ 	if err := server.Start(); err != nil {
+ 		fmt.Println("Failed to start:", err)
+-		os.Exit(-1)
++		return
+ 	}
+ 	defer server.Close()
+ 
+@@ -92,8 +92,9 @@ func executeRun(cmd *base.Command, args []string) {
+ 
+ 	{
+ 		osSignals := make(chan os.Signal, 1)
+-		signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM)
++		signal.Notify(osSignals, os.Interrupt, syscall.SIGUSR1)
+ 		<-osSignals
++		signalledExit = true
+ 	}
+ }
+ 
