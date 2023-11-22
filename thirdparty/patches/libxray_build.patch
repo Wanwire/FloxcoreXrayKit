@@ -1,9 +1,9 @@
 diff --git a/thirdparty/Xray-core-1.8.6/Makefile b/thirdparty/Xray-core-1.8.6/Makefile
 new file mode 100644
-index 0000000..096a200
+index 0000000..7c0e1a0
 --- /dev/null
 +++ b/thirdparty/Xray-core-1.8.6/Makefile
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,301 @@
 +# go/Makefile
 +
 +ARCHS ?= arm64
@@ -25,6 +25,7 @@ index 0000000..096a200
 +export GOROOT := $(BUILDDIR)/goroot
 +$(GOROOT)/.prepared:
 +	[ -n "$(REAL_GOROOT)" ]
++	rm -rf "$(GOROOT)"
 +	mkdir -p "$(GOROOT)"
 +	mkdir -p "$(DESTDIR)"
 +	rsync -a --delete --exclude=pkg/obj/go-build "$(REAL_GOROOT)/" "$(GOROOT)/"
