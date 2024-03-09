@@ -20,11 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Go-1.21.x
+      - name: Setup Go-1.22.x
         uses: actions/setup-go@v4
         with:
           # Semantic version range syntax or exact version of Go
-          go-version: '1.21.x'
+          go-version: '1.22.x'
         
       - name: Build xcframework
         run: make
