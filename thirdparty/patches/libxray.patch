@@ -1,7 +1,7 @@
-diff --git a/thirdparty/Xray-core-1.8.6/main/commands/base/execute.go b/thirdparty/Xray-core-1.8.6/main/commands/base/execute.go
+diff --git a/thirdparty/Xray-core-1.8.8/main/commands/base/execute.go b/thirdparty/Xray-core-1.8.8/main/commands/base/execute.go
 index 2d18371..2abe30b 100644
---- a/thirdparty/Xray-core-1.8.6/main/commands/base/execute.go
-+++ b/thirdparty/Xray-core-1.8.6/main/commands/base/execute.go
+--- a/thirdparty/Xray-core-1.8.8/main/commands/base/execute.go
++++ b/thirdparty/Xray-core-1.8.8/main/commands/base/execute.go
 @@ -38,8 +38,7 @@ BigCmdLoop:
  				args = args[1:]
  				if len(args) == 0 {
@@ -30,10 +30,10 @@ index 2d18371..2abe30b 100644
  	}
  }
  
-diff --git a/thirdparty/Xray-core-1.8.6/main/main.go b/thirdparty/Xray-core-1.8.6/main/main.go
+diff --git a/thirdparty/Xray-core-1.8.8/main/main.go b/thirdparty/Xray-core-1.8.8/main/main.go
 index e8824e6..02e772b 100644
---- a/thirdparty/Xray-core-1.8.6/main/main.go
-+++ b/thirdparty/Xray-core-1.8.6/main/main.go
+--- a/thirdparty/Xray-core-1.8.8/main/main.go
++++ b/thirdparty/Xray-core-1.8.8/main/main.go
 @@ -1,15 +1,43 @@
  package main
  
@@ -90,11 +90,11 @@ index e8824e6..02e772b 100644
  }
  
  func getArgsV4Compatible() []string {
-diff --git a/thirdparty/Xray-core-1.8.6/main/run.go b/thirdparty/Xray-core-1.8.6/main/run.go
-index 1f8a4b8..08700a8 100644
---- a/thirdparty/Xray-core-1.8.6/main/run.go
-+++ b/thirdparty/Xray-core-1.8.6/main/run.go
-@@ -66,17 +66,17 @@ func executeRun(cmd *base.Command, args []string) {
+diff --git a/thirdparty/Xray-core-1.8.8/main/run.go b/thirdparty/Xray-core-1.8.8/main/run.go
+index f54d748..bef1849 100644
+--- a/thirdparty/Xray-core-1.8.8/main/run.go
++++ b/thirdparty/Xray-core-1.8.8/main/run.go
+@@ -77,17 +77,17 @@ func executeRun(cmd *base.Command, args []string) {
  	if err != nil {
  		fmt.Println("Failed to start:", err)
  		// Configuration error. Exit with a special value to prevent systemd from restarting.
@@ -115,7 +115,7 @@ index 1f8a4b8..08700a8 100644
  	}
  	defer server.Close()
  
-@@ -92,8 +92,9 @@ func executeRun(cmd *base.Command, args []string) {
+@@ -103,8 +103,9 @@ func executeRun(cmd *base.Command, args []string) {
  
  	{
  		osSignals := make(chan os.Signal, 1)

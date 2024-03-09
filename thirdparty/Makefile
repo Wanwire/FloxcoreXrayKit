@@ -1,11 +1,11 @@
 
-XRAY = Xray-core-1.8.6
+XRAY = Xray-core-1.8.8
 PLATFORM ?= 
 
 default: libxray
 
 libxray: patched
-	make -C $(XRAY) $(PLATFORM)
+	make -C $(XRAY) -f MakefileFramework $(PLATFORM)
 
 patched:
 	@for patchfile in patches/libxray*.patch; do \
