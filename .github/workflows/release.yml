@@ -30,7 +30,7 @@ jobs:
         run: make
 
       - name: Archive xcframework
-        run: zip -r build/LibXray.xcframework.zip build/LibXray.xcframework
+        run: zip -r build/LibXray.xcframework.zip build/XrayKit/xcframeworks/LibXray.xcframework
 
       - name: Fix up Package.swift
         run: |
