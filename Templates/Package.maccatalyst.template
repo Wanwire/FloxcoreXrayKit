@@ -1,0 +1,28 @@
+// swift-tools-version: 5.9
+
+import PackageDescription
+
+let package = Package(
+  name: "XrayKit",
+  platforms: [.macCatalyst(.v16)],
+  products: [
+    .library(
+        name: "XrayKit",
+        targets: ["XrayKit"]
+    )
+  ],
+  targets: [
+    .target(
+        name: "XrayKit",
+        dependencies: ["XrayKitC", "LibXray"]
+    ),
+    .target(
+        name: "XrayKitC",
+        publicHeadersPath: "."
+    ),
+    .binaryTarget(
+        name: "LibXray",
+        path: "xcframeworks/LibXray.xcframework"
+    )
+  ]
+)

@@ -5,7 +5,7 @@ PLATFORM ?=
 default: libxray
 
 libxray: patched
-	make -C $(XRAY) -f MakefileFramework $(PLATFORM)
+	make -C $(XRAY) -f ../tools/MakefileFramework $(PLATFORM)
 
 patched:
 	@for patchfile in patches/libxray*.patch; do \
