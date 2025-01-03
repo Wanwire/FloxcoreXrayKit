@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
   name: "XrayKit",
-  platforms: [.iOS(.v16), .macOS(.v14), .macCatalyst(.v16), .tvOS(.v17)],
+  platforms: [.iOS(.v16), .macOS(.v14), .macCatalyst(.v16), .tvOS(.v17), .visionOS(.v1)],
   products: [
     .library(
         name: "XrayKit",
@@ -22,8 +22,8 @@ let package = Package(
     ),
     .binaryTarget(
         name: "LibXray",
-	url: "https://github.com/Wanwire/FloxcoreXrayKit/releases/download/24.12.18/LibXray.xcframework.zip",
-	checksum: "d45f8439320ad166580d9acb5d5921a9cc077e7326d4fab03299485f4956329c"
+	url: "https://github.com/Wanwire/FloxcoreXrayKit/releases/download/2025.1.3/LibXray.xcframework.zip",
+	checksum: "6edeb4ccc624129b7194178c6810f23abd5767394136e751e6ad58fa5d0e00dc"
     )
   ]
 )
