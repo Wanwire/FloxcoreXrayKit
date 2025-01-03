@@ -141,6 +141,28 @@ $(BUILDDIR)/libxray-go-macosx-arm64.a: export GOARCH := arm64
 $(BUILDDIR)/libxray-go-macosx-arm64.a: $(GOROOT)/.prepared go.mod
 	go build -ldflags=-w -trimpath -v -o "$(BUILDDIR)/libxray-go-macosx-arm64.a" -buildmode c-archive ./main
 
+# VisionOS Simulator arm64
+$(BUILDDIR)/libxray-go-visionsimulator-arm64.a: export CGO_ENABLED := 1
+$(BUILDDIR)/libxray-go-visionsimulator-arm64.a: export SDKROOT := $(shell xcrun --sdk xrsimulator --show-sdk-path)
+$(BUILDDIR)/libxray-go-visionsimulator-arm64.a: CFLAGS := -target arm64-apple-xros1.0-simulator -isysroot $(SDKROOT) -arch arm64
+$(BUILDDIR)/libxray-go-visionsimulator-arm64.a: export CGO_CFLAGS := $(CFLAGS)
+$(BUILDDIR)/libxray-go-visionsimulator-arm64.a: export CGO_LDFLAGS := $(CFLAGS)
+$(BUILDDIR)/libxray-go-visionsimulator-arm64.a: export GOOS := ios
+$(BUILDDIR)/libxray-go-visionsimulator-arm64.a: export GOARCH := arm64
+$(BUILDDIR)/libxray-go-visionsimulator-arm64.a: $(GOROOT)/.prepared go.mod
+	go build -ldflags=-w -trimpath -v -o "$(BUILDDIR)/libxray-go-visionsimulator-arm64.a" -buildmode c-archive ./main
+
+# visionOS arm64
+$(BUILDDIR)/libxray-go-visionos-arm64.a: export CGO_ENABLED := 1
+$(BUILDDIR)/libxray-go-visionos-arm64.a: export SDKROOT := $(shell xcrun --sdk xros --show-sdk-path)
+$(BUILDDIR)/libxray-go-visionos-arm64.a: CFLAGS := -mtargetos=xros1.0 -isysroot $(SDKROOT) -arch arm64
+$(BUILDDIR)/libxray-go-visionos-arm64.a: export CGO_CFLAGS := $(CFLAGS)
+$(BUILDDIR)/libxray-go-visionos-arm64.a: export CGO_LDFLAGS := $(CFLAGS)
+$(BUILDDIR)/libxray-go-visionos-arm64.a: export GOOS := ios
+$(BUILDDIR)/libxray-go-visionos-arm64.a: export GOARCH := arm64
+$(BUILDDIR)/libxray-go-visionos-arm64.a: $(GOROOT)/.prepared go.mod
+	go build -ldflags=-w -trimpath -v -o "$(BUILDDIR)/libxray-go-visionos-arm64.a" -buildmode c-archive ./main
+
 $(DESTDIR)/iPhoneOS/libxray.a: $(BUILDDIR)/libxray-go-iphoneos-arm64.a
 	mkdir -p $(dir $@)
 	$(LIPO) -create -output $@ $^
@@ -162,6 +184,14 @@ $(DESTDIR)/MacCatalyst/libxray.a: $(BUILDDIR)/libxray-go-maccatalyst-x86_64.a $(
 	$(LIPO) -create -output $@ $^
 
 $(DESTDIR)/MacOSX/libxray.a: $(BUILDDIR)/libxray-go-macosx-x86_64.a $(BUILDDIR)/libxray-go-macosx-arm64.a
+	mkdir -p $(dir $@)
+	$(LIPO) -create -output $@ $^
+
+$(DESTDIR)/VisionSimulator/libxray.a: $(BUILDDIR)/libxray-go-visionsimulator-arm64.a
+	mkdir -p $(dir $@)
+	$(LIPO) -create -output $@ $^
+
+$(DESTDIR)/VisionOS/libxray.a: $(BUILDDIR)/libxray-go-visionos-arm64.a
 	mkdir -p $(dir $@)
 	$(LIPO) -create -output $@ $^
 
@@ -245,11 +275,37 @@ macosx: $(DESTDIR)/MacOSX/libxray.a
 	cp -r "../../Sources" "$(PACKAGEDIR)/"
 	cp "../../README.md" "$(PACKAGEDIR)/"
 
+visionos: $(DESTDIR)/VisionOS/libxray.a
+	rm -rf "$(PACKAGEDIR)"
+	mkdir -p "$(PACKAGEDIR)/xcframeworks"
+	rm -rf "$(BUILDDIR)/headers"
+	mkdir -p "$(BUILDDIR)/headers/xraykit"
+	cp "$(BUILDDIR)/libxray-go-visionos-arm64.h" "$(BUILDDIR)/headers/xraykit/libxray-go.h"
+	cp ../tools/module.modulemap "$(BUILDDIR)/headers/xraykit"
+	xcodebuild -create-xcframework -library $^ -headers "$(BUILDDIR)/headers" -output "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)"
+	cp ../tools/PrivacyInfo.xcprivacy "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)/xros-arm64"
+	cp "../../Templates/Package.ios.template" "$(PACKAGEDIR)/Package.swift"
+	cp -r "../../Sources" "$(PACKAGEDIR)/"
+	cp "../../README.md" "$(PACKAGEDIR)/"
+
+visionsimulator: $(DESTDIR)/VisionSimulator/libxray.a
+	rm -rf "$(PACKAGEDIR)"
+	mkdir -p "$(PACKAGEDIR)/xcframeworks"
+	rm -rf "$(BUILDDIR)/headers"
+	mkdir -p "$(BUILDDIR)/headers/xraykit"
+	cp "$(BUILDDIR)/libxray-go-visionsimulator-arm64.h" "$(BUILDDIR)/headers/xraykit/libxray-go.h"
+	cp ../tools/module.modulemap "$(BUILDDIR)/headers/xraykit"
+	xcodebuild -create-xcframework -library $^ -headers "$(BUILDDIR)/headers" -output "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)"
+	cp ../tools/PrivacyInfo.xcprivacy "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)/xros-arm64-simulator"
+	cp "../../Templates/Package.ios.template" "$(PACKAGEDIR)/Package.swift"
+	cp -r "../../Sources" "$(PACKAGEDIR)/"
+	cp "../../README.md" "$(PACKAGEDIR)/"
+
 default: $(PACKAGEDIR)
 
 all: $(PACKAGEDIR)
 
-$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR): $(DESTDIR)/iPhoneOS/libxray.a $(DESTDIR)/iPhoneSimulator/libxray.a $(DESTDIR)/AppleTVSimulator/libxray.a $(DESTDIR)/MacCatalyst/libxray.a $(DESTDIR)/MacOSX/libxray.a $(DESTDIR)/AppleTVOS/libxray.a
+$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR): $(DESTDIR)/iPhoneOS/libxray.a $(DESTDIR)/iPhoneSimulator/libxray.a $(DESTDIR)/AppleTVSimulator/libxray.a $(DESTDIR)/MacCatalyst/libxray.a $(DESTDIR)/MacOSX/libxray.a $(DESTDIR)/AppleTVOS/libxray.a $(DESTDIR)/VisionOS/libxray.a $(DESTDIR)/VisionSimulator/libxray.a
 	rm -rf "$@"
 	mkdir -p "$@"
 	rm -rf "$(BUILDDIR)/headers"
@@ -263,7 +319,9 @@ $(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR): $(DESTDIR)/iPhoneOS/libxray.a $(DE
 		-library "$(DESTDIR)/AppleTVSimulator/libxray.a" -headers "$(BUILDDIR)/headers" \
 		-library "$(DESTDIR)/AppleTVOS/libxray.a" -headers "$(BUILDDIR)/headers" \
 		-library "$(DESTDIR)/MacCatalyst/libxray.a" -headers "$(BUILDDIR)/headers" \
-		-library "$(DESTDIR)/MacOSX/libxray.a" -headers "$(BUILDDIR)/headers"
+		-library "$(DESTDIR)/MacOSX/libxray.a" -headers "$(BUILDDIR)/headers" \
+		-library "$(DESTDIR)/VisionSimulator/libxray.a" -headers "$(BUILDDIR)/headers" \
+		-library "$(DESTDIR)/VisionOS/libxray.a" -headers "$(BUILDDIR)/headers"
 	mkdir -p "$@/macos-arm64_x86_64/Versions/A/Resources"
 	cp ../tools/PrivacyInfo.xcprivacy "$@/macos-arm64_x86_64/Versions/A/Resources/"
 	mkdir -p "$@/ios-arm64_x86_64-maccatalyst/Versions/A/Resources"
@@ -272,6 +330,8 @@ $(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR): $(DESTDIR)/iPhoneOS/libxray.a $(DE
 	cp ../tools/PrivacyInfo.xcprivacy "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)/ios-arm64"
 	cp ../tools/PrivacyInfo.xcprivacy "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)/tvos-arm64_x86_64-simulator"
 	cp ../tools/PrivacyInfo.xcprivacy "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)/tvos-arm64"
+	cp ../tools/PrivacyInfo.xcprivacy "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)/xros-arm64-simulator"
+	cp ../tools/PrivacyInfo.xcprivacy "$(PACKAGEDIR)/xcframeworks/$(XCFRAMEWORKDIR)/xros-arm64"
 	cp "../../Templates/Package.local.template" "$(PACKAGEDIR)/Package.swift"
 	cp -r "../../Sources" "$(PACKAGEDIR)/"
 	cp "../../README.md" "$(PACKAGEDIR)/"
@@ -298,4 +358,4 @@ clean:
 
 install: build
 
-.PHONY: clean build install all ios appletvsimulator iphoneos iphonesimulator maccatalyst macosx detect_platform
+.PHONY: clean build install all ios appletvsimulator iphoneos iphonesimulator maccatalyst macosx detect_platform visionos visionsimulator
