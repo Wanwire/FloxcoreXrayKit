@@ -1,7 +1,7 @@
-diff --git a/thirdparty/Xray-core-24.12.18/main/commands/base/execute.go b/thirdparty/Xray-core-24.12.18/main/commands/base/execute.go
+diff --git a/thirdparty/Xray-core-25.5.16/main/commands/base/execute.go b/thirdparty/Xray-core-25.5.16/main/commands/base/execute.go
 index 2d18371..2abe30b 100644
---- a/thirdparty/Xray-core-24.12.18/main/commands/base/execute.go
-+++ b/thirdparty/Xray-core-24.12.18/main/commands/base/execute.go
+--- a/thirdparty/Xray-core-25.5.16/main/commands/base/execute.go
++++ b/thirdparty/Xray-core-25.5.16/main/commands/base/execute.go
 @@ -38,8 +38,7 @@ BigCmdLoop:
  				args = args[1:]
  				if len(args) == 0 {
@@ -30,10 +30,10 @@ index 2d18371..2abe30b 100644
  	}
  }
  
-diff --git a/thirdparty/Xray-core-24.12.18/main/main.go b/thirdparty/Xray-core-24.12.18/main/main.go
+diff --git a/thirdparty/Xray-core-25.5.16/main/main.go b/thirdparty/Xray-core-25.5.16/main/main.go
 index e8824e6..02e772b 100644
---- a/thirdparty/Xray-core-24.12.18/main/main.go
-+++ b/thirdparty/Xray-core-24.12.18/main/main.go
+--- a/thirdparty/Xray-core-25.5.16/main/main.go
++++ b/thirdparty/Xray-core-25.5.16/main/main.go
 @@ -1,15 +1,43 @@
  package main
  
@@ -90,10 +90,10 @@ index e8824e6..02e772b 100644
  }
  
  func getArgsV4Compatible() []string {
-diff --git a/thirdparty/Xray-core-24.12.18/main/run.go b/thirdparty/Xray-core-24.12.18/main/run.go
+diff --git a/thirdparty/Xray-core-25.5.16/main/run.go b/thirdparty/Xray-core-25.5.16/main/run.go
 index f54d748..bef1849 100644
---- a/thirdparty/Xray-core-24.12.18/main/run.go
-+++ b/thirdparty/Xray-core-24.12.18/main/run.go
+--- a/thirdparty/Xray-core-25.5.16/main/run.go
++++ b/thirdparty/Xray-core-25.5.16/main/run.go
 @@ -77,17 +77,17 @@ func executeRun(cmd *base.Command, args []string) {
  	if err != nil {
  		fmt.Println("Failed to start:", err)
