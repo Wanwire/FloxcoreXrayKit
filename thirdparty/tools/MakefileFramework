@@ -25,6 +25,7 @@ $(GOROOT)/.prepared:
 	mkdir -p "$(GOROOT)"
 	mkdir -p "$(DESTDIR)"
 	rsync -a --delete --exclude=pkg/obj/go-build "$(REAL_GOROOT)/" "$(GOROOT)/"
+	chmod -R +w "$(GOROOT)/"
 	touch "$@"
 
 # MacCatalyst arm64
