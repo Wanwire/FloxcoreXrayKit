@@ -8,14 +8,19 @@
 ```swift
 import XrayKit
 
-/* Start XrayCore */
-let configurationFile = FileManager.default.temporaryDirectory.appendingPathComponent("xray").appendingPathExtension("json")
-// Write Xray configuration to configurationFile
-
+/* Find path to geoip.dat and geosite.dat in Bundle resources */
 let geoip = Bundle.main.url(forResource: "geoip", withExtension: "dat")!
 let assets = geoip.deletingLastPathComponent()
 
-XRayCore.run(configuration: configuratonFile, assets: assets) { error in
+/* Define your configuration */
+let configurationData = """
+{
+  "your": "configuration"
+}
+""".data(using: .utf8)
+
+/* Start XrayCore */
+XRayCore.run(configuration: configurationData, assets: assets) { error in
     if let error = error {
         // Present error
     }
