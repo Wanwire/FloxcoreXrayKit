@@ -25,5 +25,5 @@ clean:
 	$(MAKE) -C thirdparty clean
 	@rm -rf "$(DESTDIR)" "$(PACKAGE)"
 
-.PHONY: all clean
+.PHONY: all clean local
 

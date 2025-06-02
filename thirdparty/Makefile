@@ -11,7 +11,7 @@ patched:
 	@for patchfile in patches/libxray*.patch; do \
 		git apply --check $$patchfile; \
 		if [ $$? == 0 ]; then \
-			git apply --whitespace=fix $$patchfile || true; \
+			git apply --whitespace=fix $$patchfile; \
 		fi; \
 	done;
 	touch $(XRAY)/patched
