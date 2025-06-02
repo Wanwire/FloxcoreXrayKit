@@ -3,16 +3,7 @@ import NetworkExtension
 import LibXray
     
 public enum XrayCore {
-    private static var running_on_pid: pid_t = 0
-
     public static func run(config url: URL, assets: URL) -> Result<Void, NEVPNError> {
-        running_on_pid = getpid()
-        guard running_on_pid > 0 else {
-            print("XrayCore cannot be running on pid \(running_on_pid). Bailing out.")
-            let error = NEVPNError(.configurationInvalid, userInfo: [NSLocalizedDescriptionKey:"XrayCore cannot be running on pid \(running_on_pid). Bailing out."])
-            return .failure(error)
-        }
-        
         let args: [String] = ["libxray", "-c", url.path]
         var argv = args.map { strdup($0) }
         let argc = Int32(argv.count)
@@ -35,7 +26,7 @@ public enum XrayCore {
     }
 
     public static func quit() {
-        kill(running_on_pid, SIGUSR1)
+        libxray_stop()
     }
 }
 
