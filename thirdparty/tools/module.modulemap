@@ -1,4 +1,0 @@
-module LibXray {
-  header "libxray-go.h"
-  export *
-}

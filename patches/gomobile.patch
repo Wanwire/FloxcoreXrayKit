@@ -1,0 +1,144 @@
+commit d06997238a9c7af7e8a774a830eea50c354acd39
+Author: Thomas Veerman <thomas.veerman@wanwire.net>
+Date:   Tue Sep 30 17:17:46 2025 +0200
+
+    cmd/gomobile: add support for Apple TV and XROS
+
+diff --git a/cmd/gomobile/bind_iosapp.go b/cmd/gomobile/bind_iosapp.go
+index ca3815e..7f2001d 100644
+--- a/cmd/gomobile/bind_iosapp.go
++++ b/cmd/gomobile/bind_iosapp.go
+@@ -321,7 +321,7 @@ func frameworkLayoutForTarget(t targetInfo, title string) (*frameworkLayout, err
+ 				filepath.Join("Versions/Current", title): title,
+ 			},
+ 		}, nil
+-	case "ios", "iossimulator":
++	case "ios", "iossimulator", "appletvos", "appletvsimulator", "xros", "xrsimulator":
+ 		return &frameworkLayout{
+ 			headerPath:    "Headers",
+ 			binaryPath:    ".",
+diff --git a/cmd/gomobile/build.go b/cmd/gomobile/build.go
+index a8f0ad2..9f87314 100644
+--- a/cmd/gomobile/build.go
++++ b/cmd/gomobile/build.go
+@@ -233,21 +233,24 @@ func printcmd(format string, args ...interface{}) {
+ 
+ // "Build flags", used by multiple commands.
+ var (
+-	buildA          bool        // -a
+-	buildI          bool        // -i
+-	buildN          bool        // -n
+-	buildV          bool        // -v
+-	buildX          bool        // -x
+-	buildO          string      // -o
+-	buildGcflags    string      // -gcflags
+-	buildLdflags    string      // -ldflags
+-	buildTarget     string      // -target
+-	buildTrimpath   bool        // -trimpath
+-	buildWork       bool        // -work
+-	buildBundleID   string      // -bundleid
+-	buildIOSVersion string      // -iosversion
+-	buildAndroidAPI int         // -androidapi
+-	buildTags       stringsFlag // -tags
++	buildA            bool        // -a
++	buildI            bool        // -i
++	buildN            bool        // -n
++	buildV            bool        // -v
++	buildX            bool        // -x
++	buildO            string      // -o
++	buildGcflags      string      // -gcflags
++	buildLdflags      string      // -ldflags
++	buildTarget       string      // -target
++	buildTrimpath     bool        // -trimpath
++	buildWork         bool        // -work
++	buildBundleID     string      // -bundleid
++	buildIOSVersion   string      // -iosversion
++	buildTVOSVersion  string      // -tvosversion
++	buildXROSVersion  string      // -xrosversion
++	buildMacOSVersion string      // -macosversion
++	buildAndroidAPI   int         // -androidapi
++	buildTags         stringsFlag // -tags
+ )
+ 
+ func addBuildFlags(cmd *command) {
+@@ -257,6 +260,9 @@ func addBuildFlags(cmd *command) {
+ 	cmd.flag.StringVar(&buildTarget, "target", "android", "")
+ 	cmd.flag.StringVar(&buildBundleID, "bundleid", "", "")
+ 	cmd.flag.StringVar(&buildIOSVersion, "iosversion", "13.0", "")
++	cmd.flag.StringVar(&buildTVOSVersion, "tvosversion", "13.0", "")
++	cmd.flag.StringVar(&buildXROSVersion, "xrosversion", "1.0", "")
++	cmd.flag.StringVar(&buildMacOSVersion, "macosversion", "11.0", "")
+ 	cmd.flag.IntVar(&buildAndroidAPI, "androidapi", minAndroidAPI, "")
+ 
+ 	cmd.flag.BoolVar(&buildA, "a", false, "")
+diff --git a/cmd/gomobile/env.go b/cmd/gomobile/env.go
+index 869e38c..cc39091 100644
+--- a/cmd/gomobile/env.go
++++ b/cmd/gomobile/env.go
+@@ -35,13 +35,13 @@ func isApplePlatform(platform string) bool {
+ 	return contains(applePlatforms, platform)
+ }
+ 
+-var applePlatforms = []string{"ios", "iossimulator", "macos", "maccatalyst"}
++var applePlatforms = []string{"ios", "iossimulator", "macos", "maccatalyst", "appletvos", "appletvsimulator", "xros", "xrsimulator"}
+ 
+ func platformArchs(platform string) []string {
+ 	switch platform {
+-	case "ios":
++	case "ios", "appletvos", "xros":
+ 		return []string{"arm64"}
+-	case "iossimulator":
++	case "iossimulator", "appletvsimulator", "xrsimulator":
+ 		return []string{"arm64", "amd64"}
+ 	case "macos", "maccatalyst":
+ 		return []string{"arm64", "amd64"}
+@@ -61,7 +61,7 @@ func platformOS(platform string) string {
+ 	switch platform {
+ 	case "android":
+ 		return "android"
+-	case "ios", "iossimulator":
++	case "ios", "iossimulator", "appletvos", "appletvsimulator", "xros", "xrsimulator":
+ 		return "ios"
+ 	case "macos", "maccatalyst":
+ 		// For "maccatalyst", Go packages should be built with GOOS=darwin,
+@@ -98,6 +98,10 @@ func platformTags(platform string) []string {
+ 		// To help discriminate between darwin, ios, macos, and maccatalyst
+ 		// targets, there is also a "maccatalyst" tag.
+ 		return []string{"macos", "maccatalyst"}
++	case "appletvos", "appletvsimulator":
++		return []string{"appletvos"}
++	case "xros", "xrsimulator":
++		return []string{"xros"}
+ 	default:
+ 		panic(fmt.Sprintf("unexpected platform: %s", platform))
+ 	}
+@@ -252,6 +256,29 @@ func envInit() (err error) {
+ 				if arch == "arm64" {
+ 					cflags += " -fembed-bitcode"
+ 				}
++				cflags += " -mmacosx-version-min=" + buildMacOSVersion
++			case "appletvos":
++				goos = "ios"
++				sdk = "appletvos"
++				clang, cflags, err = envClang(sdk)
++				cflags += " -mappletvos-version-min=" + buildTVOSVersion
++				cflags += " -fembed-bitcode"
++			case "appletvsimulator":
++				goos = "ios"
++				sdk = "appletvsimulator"
++				clang, cflags, err = envClang(sdk)
++				cflags += " -mappletvsimulator-version-min=" + buildTVOSVersion
++				cflags += " -fembed-bitcode"
++			case "xros":
++				goos = "ios"
++				sdk = "xros"
++				clang, cflags, err = envClang(sdk)
++				cflags += " -fembed-bitcode"
++			case "xrsimulator":
++				goos = "ios"
++				sdk = "xrsimulator"
++				clang, cflags, err = envClang(sdk)
++				cflags += " -fembed-bitcode"
+ 			default:
+ 				panic(fmt.Errorf("unknown Apple target: %s/%s", platform, arch))
+ 			}

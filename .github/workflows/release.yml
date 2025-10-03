@@ -17,30 +17,47 @@ jobs:
       # added or changed files to the repository
       contents: write
 
+    env:
+      FRAMEWORK_FILENAME: LibXrayGo.xcframework
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Go-1.22.x
+      - name: Setup Go-1.24.x
         uses: actions/setup-go@v4
         with:
           # Semantic version range syntax or exact version of Go
-          go-version: '1.22.x'
+          go-version: '1.24.x'
         
+      - name: Setup Gomobile
+        run: |
+          git clone https://go.googlesource.com/mobile /tmp/mobile
+          pushd /tmp/mobile
+          git apply ${{ github.workspace }}/patches/gomobile.patch
+          go build -o gomobile ./cmd/gomobile
+          chmod +x gomobile
+          popd
+          export PATH=/tmp/mobile/:$PATH
+          echo "PATH=$PATH" >> $GITHUB_ENV
+
       - name: Build xcframework
-        run: make
+        run: |
+            gomobile init
+            gomobile bind -target ios,iossimulator,macos,maccatalyst,appletvos,appletvsimulator,xros,xrsimulator -iosversion=16 -tvosversion=17 -x -o ${{ env.FRAMEWORK_FILENAME }}
 
       - name: Archive xcframework
-        run: zip -r build/LibXray.xcframework.zip build/XrayKit/xcframeworks/LibXray.xcframework
+        run: zip -r ${{ env.FRAMEWORK_FILENAME }}.zip ${{ env.FRAMEWORK_FILENAME }}
 
       - name: Fix up Package.swift
         run: |
-            export TEMP=`shasum -a 256 ./build/LibXray.xcframework.zip`
+            export TEMP=`shasum -a 256 ${{ env.FRAMEWORK_FILENAME }}.zip`
             export CHECKSUM=${TEMP:0:64}
-            cd Templates
+            cd Template
             sed -i ".bak" "s/VERSION/${{ github.event.inputs.version }}/g" Package.template
             sed -i ".bak" "s/CHECKSUM/${CHECKSUM}/g" Package.template
+            sed -i ".bak" "s/FRAMEWORK_FILENAME/${{ env.FRAMEWORK_FILENAME }}.zip/g" Package.template
             cd ..
-            cp ./Templates/Package.template Package.swift
+            cp ./Template/Package.template Package.swift
 
       - uses: stefanzweifel/git-auto-commit-action@v4
         with:
@@ -57,4 +74,4 @@ jobs:
         with:
           draft: false
           tag_name: ${{ github.event.inputs.version }}
-          files: ./build/LibXray.xcframework.zip
+          files: ${{ env.FRAMEWORK_FILENAME }}.zip
