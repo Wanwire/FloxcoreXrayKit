@@ -116,11 +116,15 @@ func (controller *XrayCoreController) doStart(configContent string) error {
 
 	config, err := xraycoreserial.LoadJSONConfig(strings.NewReader(configContent))
 	if err != nil {
+		errorString := fmt.Sprintf("config error: %s", err)
+		controller.CallbackHandler.OnStartFailure(errorString)
 		return fmt.Errorf("config error: %w", err)
 	}
 
 	controller.coreInstance, err = xraycore.New(config)
 	if err != nil {
+		errorString := fmt.Sprintf("xray-core start failed: %s", err)
+		controller.CallbackHandler.OnStartFailure(errorString)
 		return fmt.Errorf("core init failed: %w", err)
 	}
 	controller.statsManager = controller.coreInstance.GetFeature(xraycorestats.ManagerType()).(xraycorestats.Manager)
@@ -129,9 +133,9 @@ func (controller *XrayCoreController) doStart(configContent string) error {
 	controller.IsRunning = true
 	if err := controller.coreInstance.Start(); err != nil {
 		controller.IsRunning = false
-		errorString := fmt.Sprintf("xray-core start failed: %v", err)
+		errorString := fmt.Sprintf("xray-core start failed: %s", err)
+		fmt.Printf("xray-core failed to start: %s\n", errorString)
 		controller.CallbackHandler.OnStartFailure(errorString)
-
 		return fmt.Errorf(errorString)
 	}
 
