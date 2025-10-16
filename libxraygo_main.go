@@ -129,7 +129,6 @@ func (controller *XrayCoreController) doStart(configContent string) error {
 	}
 	controller.statsManager = controller.coreInstance.GetFeature(xraycorestats.ManagerType()).(xraycorestats.Manager)
 
-	log.Printf("starting xray-core")
 	controller.IsRunning = true
 	if err := controller.coreInstance.Start(); err != nil {
 		controller.IsRunning = false
