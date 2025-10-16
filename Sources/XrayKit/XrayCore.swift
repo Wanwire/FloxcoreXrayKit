@@ -2,6 +2,11 @@ import Foundation
 import NetworkExtension
 import LibXrayGo
 
+public enum XrayCoreStartError: Error {
+    case invalidConfiguration(String)
+    case connectionFailed(String)
+}
+
 public protocol XrayCoreManagerProtocol {
     func onEmitStatus(code: Int, message: String?)
     func onStart()
@@ -9,7 +14,7 @@ public protocol XrayCoreManagerProtocol {
     func onStop()
 }
 
-public actor XrayCoreManager {
+public class XrayCoreManager {
     private class XrayCoreManagerCallbackHandler: NSObject, LibxraygoXrayCoreCallbackHandlerProtocol {
         var onEmitStatusCb: ((Int, String?) -> ())? = nil
         var onStartCb: (() -> ())? = nil
@@ -32,36 +37,34 @@ public actor XrayCoreManager {
             self.onStopCb = cb
         }
         
-        func onEmitStatus(_ p0: Int, p1: String?) -> Int {
+        public func onEmitStatus(_ p0: Int, p1: String?) -> Int {
             onEmitStatusCb?(p0, p1)
             return 0
         }
         
-        func onStart() -> Int {
+        public func onStart() -> Int {
             onStartCb?()
             return 0
         }
         
-        func onStartFailure(_ p0: String?) -> Int {
+        public func onStartFailure(_ p0: String?) -> Int {
             onStartFailureCb?(p0)
             return 0
         }
         
-        func onStop() -> Int {
+        public func onStop() -> Int {
             onStopCb?()
             return 0
         }
     }
-    
-    private var xcCallbackHandler: XrayCoreManagerCallbackHandler
+    private let libXcCallbackHandler: XrayCoreManagerCallbackHandler = .init()
     private var callbackHandler: XrayCoreManagerProtocol? = nil
     private var controller: LibxraygoXrayCoreController? = nil
-    private var startCompletion: ((NEVPNError?) -> ())? = nil
+    private var startCompletion: ((XrayCoreStartError?) -> ())? = nil
     
     public init(callbackHandler handler: XrayCoreManagerProtocol? = nil) {
         callbackHandler = handler
-        xcCallbackHandler = XrayCoreManagerCallbackHandler()
-        controller = LibxraygoNewXrayCoreController(xcCallbackHandler)
+        controller = LibxraygoNewXrayCoreController(libXcCallbackHandler)
     }
       
     private func emittedStatus(code: Int, message: String?) {
@@ -74,7 +77,14 @@ public actor XrayCoreManager {
     }
     
     private func startFailed(_ message: String?) {
-        let error = NEVPNError(.connectionFailed)
+        if let message = message, message.starts(with: "config error") {
+            let error = XrayCoreStartError.invalidConfiguration(message)
+            startCompletion?(error)
+            callbackHandler?.onStartFailure(message: message)
+            return
+        }
+
+        let error = XrayCoreStartError.connectionFailed(message ?? "")
         startCompletion?(error)
         callbackHandler?.onStartFailure(message: message)
     }
@@ -83,24 +93,24 @@ public actor XrayCoreManager {
         callbackHandler?.onStop()
     }
     
-    public func start(config: String, assets: URL, completion: @escaping (NEVPNError?) -> ()) {
-        xcCallbackHandler.setEmitStatusCallback { [weak self] code, message in
+    public func start(config: String, assets: URL, completion: @escaping (XrayCoreStartError?) -> ()) {
+        libXcCallbackHandler.setEmitStatusCallback { [weak self] code, message in
             Task { await self?.emittedStatus(code: code, message: message) }
         }
-        xcCallbackHandler.setStartCallback { [weak self] in
+        libXcCallbackHandler.setStartCallback { [weak self] in
             Task { await self?.started() }
         }
-        xcCallbackHandler.setStartFailureCallback { [weak self] message in
+        libXcCallbackHandler.setStartFailureCallback { [weak self] message in
             Task { await self?.startFailed(message) }
         }
-        xcCallbackHandler.setStopCallback { [weak self] in
+        libXcCallbackHandler.setStopCallback { [weak self] in
             Task { await self?.stopped() }
         }
 
         LibxraygoInitXrayCoreEnv(assets.path)
         
         guard let controller else {
-            let error = NEVPNError(.connectionFailed)
+            let error = XrayCoreStartError.connectionFailed("No controller")
             completion(error)
             return
         }
@@ -109,9 +119,9 @@ public actor XrayCoreManager {
         controller.start(config)
     }
     
-    public func start(config: String, assets: URL) async -> Result<Void, NEVPNError> {
+    public func start(config: String, assets: URL) async -> Result<Void, XrayCoreStartError> {
         await withCheckedContinuation { continuation in
-            start(config: config, assets: assets) { (error: NEVPNError?) in
+            start(config: config, assets: assets) { (error: XrayCoreStartError?) in
                 guard let error else { return continuation.resume(returning: .success(())) }
                 continuation.resume(returning: .failure(error))
             }
@@ -138,7 +148,17 @@ public enum XrayCore {
         
         Task {
             let result = await controller.start(config: dataStr, assets: assets)
-            taskResult = result
+            switch result {
+            case .failure(let error):
+                switch error {
+                case .connectionFailed:
+                    taskResult = .failure(NEVPNError(.connectionFailed))
+                case .invalidConfiguration:
+                    taskResult = .failure(NEVPNError(.configurationInvalid))
+                }
+            case .success:
+                taskResult = .success(())
+            }
             group.leave()
         }
         
