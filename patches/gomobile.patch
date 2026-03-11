@@ -1,8 +1,8 @@
-commit d06997238a9c7af7e8a774a830eea50c354acd39
+commit 914b08b9751d8815b6d38e02533d6c00fa18c847
 Author: Thomas Veerman <thomas.veerman@wanwire.net>
-Date:   Tue Sep 30 17:17:46 2025 +0200
+Date:   Wed Mar 11 15:18:31 2026 +0100
 
-    cmd/gomobile: add support for Apple TV and XROS
+    cmd/gomobile: add support for Apple TV and xrOS
 
 diff --git a/cmd/gomobile/bind_iosapp.go b/cmd/gomobile/bind_iosapp.go
 index ca3815e..7f2001d 100644
@@ -18,10 +18,10 @@ index ca3815e..7f2001d 100644
  			headerPath:    "Headers",
  			binaryPath:    ".",
 diff --git a/cmd/gomobile/build.go b/cmd/gomobile/build.go
-index a8f0ad2..9f87314 100644
+index 2114a71..6e7bd1b 100644
 --- a/cmd/gomobile/build.go
 +++ b/cmd/gomobile/build.go
-@@ -233,21 +233,24 @@ func printcmd(format string, args ...interface{}) {
+@@ -234,22 +234,25 @@ func printcmd(format string, args ...interface{}) {
  
  // "Build flags", used by multiple commands.
  var (
@@ -33,6 +33,7 @@ index a8f0ad2..9f87314 100644
 -	buildO          string      // -o
 -	buildGcflags    string      // -gcflags
 -	buildLdflags    string      // -ldflags
+-	buildOverlay    string      // -overlay
 -	buildTarget     string      // -target
 -	buildTrimpath   bool        // -trimpath
 -	buildWork       bool        // -work
@@ -48,6 +49,7 @@ index a8f0ad2..9f87314 100644
 +	buildO            string      // -o
 +	buildGcflags      string      // -gcflags
 +	buildLdflags      string      // -ldflags
++	buildOverlay      string      // -overlay
 +	buildTarget       string      // -target
 +	buildTrimpath     bool        // -trimpath
 +	buildWork         bool        // -work
@@ -61,7 +63,7 @@ index a8f0ad2..9f87314 100644
  )
  
  func addBuildFlags(cmd *command) {
-@@ -257,6 +260,9 @@ func addBuildFlags(cmd *command) {
+@@ -260,6 +263,9 @@ func addBuildFlags(cmd *command) {
  	cmd.flag.StringVar(&buildTarget, "target", "android", "")
  	cmd.flag.StringVar(&buildBundleID, "bundleid", "", "")
  	cmd.flag.StringVar(&buildIOSVersion, "iosversion", "13.0", "")
@@ -72,7 +74,7 @@ index a8f0ad2..9f87314 100644
  
  	cmd.flag.BoolVar(&buildA, "a", false, "")
 diff --git a/cmd/gomobile/env.go b/cmd/gomobile/env.go
-index 869e38c..cc39091 100644
+index 6dab96e..6bf06ae 100644
 --- a/cmd/gomobile/env.go
 +++ b/cmd/gomobile/env.go
 @@ -35,13 +35,13 @@ func isApplePlatform(platform string) bool {
