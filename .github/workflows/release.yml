@@ -21,13 +21,13 @@ jobs:
       FRAMEWORK_FILENAME: LibXrayGo.xcframework
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Setup Go-1.24.x
-        uses: actions/setup-go@v4
+      - name: Setup Go-1.25.x
+        uses: actions/setup-go@v6
         with:
           # Semantic version range syntax or exact version of Go
-          go-version: '1.24.x'
+          go-version: '1.25.x'
         
       - name: Setup Gomobile
         run: |
@@ -59,7 +59,7 @@ jobs:
             cd ..
             cp ./Template/Package.template Package.swift
 
-      - uses: stefanzweifel/git-auto-commit-action@v4
+      - uses: stefanzweifel/git-auto-commit-action@v7
         with:
             commit_message: XrayKit Release ${{ github.event.inputs.version }}
             commit_user_name: GitHub Actions Bot
@@ -70,7 +70,7 @@ jobs:
             file_pattern: 'Package.swift'
 
       - name: Upload Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           draft: false
           tag_name: ${{ github.event.inputs.version }}
