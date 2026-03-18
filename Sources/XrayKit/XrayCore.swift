@@ -93,7 +93,7 @@ public class XrayCoreManager {
         callbackHandler?.onStop()
     }
     
-    public func start(config: String, assets: URL, completion: @escaping (XrayCoreStartError?) -> ()) {
+    public func start(config: String, assets: URL, tunFd: Int32, completion: @escaping (XrayCoreStartError?) -> ()) {
         libXcCallbackHandler.setEmitStatusCallback { [weak self] code, message in
             Task { await self?.emittedStatus(code: code, message: message) }
         }
@@ -107,7 +107,8 @@ public class XrayCoreManager {
             Task { await self?.stopped() }
         }
 
-        LibxraygoInitXrayCoreEnv(assets.path)
+        LibxraygoInitXrayCoreAssetEnv(assets.path)
+        LibxraygoInitXrayCoreTunFdEnv(tunFd)
         
         guard let controller else {
             let error = XrayCoreStartError.connectionFailed("No controller")
@@ -119,9 +120,9 @@ public class XrayCoreManager {
         controller.start(config)
     }
     
-    public func start(config: String, assets: URL) async -> Result<Void, XrayCoreStartError> {
+    public func start(config: String, assets: URL, _ tunFd: Int32 = 0) async -> Result<Void, XrayCoreStartError> {
         await withCheckedContinuation { continuation in
-            start(config: config, assets: assets) { (error: XrayCoreStartError?) in
+            start(config: config, assets: assets, tunFd: tunFd) { (error: XrayCoreStartError?) in
                 guard let error else { return continuation.resume(returning: .success(())) }
                 continuation.resume(returning: .failure(error))
             }

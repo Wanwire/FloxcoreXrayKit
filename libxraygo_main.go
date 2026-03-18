@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,6 +24,7 @@ import (
 // Constants for environment variable keys.
 const (
 	envLocationAsset = "xray.location.asset"
+	envTunFd = "xray.tun.fd"
 )
 
 type XrayCoreCallbackHandler interface {
@@ -85,7 +87,7 @@ func NewXrayCoreController(s XrayCoreCallbackHandler) *XrayCoreController {
 	}
 }
 
-func InitXrayCoreEnv(assetPath string) {
+func InitXrayCoreAssetEnv(assetPath string) {
 	// Setup file reader to checks assets when file is not in the filesystem.
 	xraycorefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -97,6 +99,11 @@ func InitXrayCoreEnv(assetPath string) {
 
 	// Set the environment variable for asset location.
 	setEnv(envLocationAsset, assetPath)
+}
+
+func InitXrayCoreTunFdEnv(tunFd int32) {
+	// Set TUN fd; set to 0 to disable TUN
+	setEnv(envTunFd, strconv.Itoa(int(tunFd)))
 }
 
 func (controller *XrayCoreController) Start(configContent string) {
