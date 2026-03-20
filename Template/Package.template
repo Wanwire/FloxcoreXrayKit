@@ -14,7 +14,11 @@ let package = Package(
   targets: [
     .target(
         name: "XrayKit",
-        dependencies: ["LibXrayGo"]
+        dependencies: ["XrayKitUtil", "LibXrayGo"]
+    ),
+    .target(
+        name: "XrayKitUtil",
+        publicHeadersPath: "include" 
     ),
     .binaryTarget(
         name: "LibXrayGo",

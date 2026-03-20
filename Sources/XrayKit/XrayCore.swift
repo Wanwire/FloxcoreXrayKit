@@ -1,5 +1,7 @@
 import Foundation
+import Darwin
 import NetworkExtension
+import XrayKitUtil
 import LibXrayGo
 
 public enum XrayCoreStartError: Error {
@@ -66,6 +68,38 @@ public class XrayCoreManager {
         callbackHandler = handler
         controller = LibxraygoNewXrayCoreController(libXcCallbackHandler)
     }
+
+    private var tunnelFileDescriptor: Int32? {
+        var ctlInfo = ctl_info()
+        withUnsafeMutablePointer(to: &ctlInfo.ctl_name) {
+            $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: $0.pointee)) {
+                _ = strcpy($0, "com.apple.net.utun_control")
+            }
+        }
+        for fd: Int32 in 0...1024 {
+            var addr = sockaddr_ctl()
+            var ret: Int32 = -1
+            var len = socklen_t(MemoryLayout.size(ofValue: addr))
+            withUnsafeMutablePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    ret = getpeername(fd, $0, &len)
+                }
+            }
+            if ret != 0 || addr.sc_family != AF_SYSTEM {
+                continue
+            }
+            if ctlInfo.ctl_id == 0 {
+                ret = ioctl(fd, CTLIOCGINFO, &ctlInfo)
+                if ret != 0 {
+                    continue
+                }
+            }
+            if addr.sc_id == ctlInfo.ctl_id {
+                return fd
+            }
+        }
+        return nil
+    }
       
     private func emittedStatus(code: Int, message: String?) {
         callbackHandler?.onEmitStatus(code: code, message: message)
@@ -93,7 +127,15 @@ public class XrayCoreManager {
         callbackHandler?.onStop()
     }
     
-    public func start(config: String, assets: URL, tunFd: Int32, completion: @escaping (XrayCoreStartError?) -> ()) {
+    public func start(config: String, assets: URL, withTun: Bool = false, completion: @escaping (XrayCoreStartError?) -> ()) {
+        guard
+            let tunFd = withTun ? self.tunnelFileDescriptor : 0
+        else {
+            let error = XrayCoreStartError.connectionFailed("No tun device found")
+            completion(error)
+            return
+        }
+
         libXcCallbackHandler.setEmitStatusCallback { [weak self] code, message in
             Task { await self?.emittedStatus(code: code, message: message) }
         }
@@ -120,9 +162,9 @@ public class XrayCoreManager {
         controller.start(config)
     }
     
-    public func start(config: String, assets: URL, _ tunFd: Int32 = 0) async -> Result<Void, XrayCoreStartError> {
+    public func start(config: String, assets: URL, withTun: Bool = false) async -> Result<Void, XrayCoreStartError> {
         await withCheckedContinuation { continuation in
-            start(config: config, assets: assets, tunFd: tunFd) { (error: XrayCoreStartError?) in
+            start(config: config, assets: assets, withTun: withTun) { (error: XrayCoreStartError?) in
                 guard let error else { return continuation.resume(returning: .success(())) }
                 continuation.resume(returning: .failure(error))
             }
