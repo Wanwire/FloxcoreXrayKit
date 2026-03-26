@@ -10,7 +10,7 @@ on:
 
 jobs:
   release:
-    runs-on: macOS-15
+    runs-on: macos-26
 
     permissions:
       # Give the default GITHUB_TOKEN write permission to commit and push the
