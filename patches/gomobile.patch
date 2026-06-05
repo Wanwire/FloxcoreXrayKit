@@ -1,9 +1,3 @@
-commit 914b08b9751d8815b6d38e02533d6c00fa18c847
-Author: Thomas Veerman <thomas.veerman@wanwire.net>
-Date:   Wed Mar 11 15:18:31 2026 +0100
-
-    cmd/gomobile: add support for Apple TV and xrOS
-
 diff --git a/cmd/gomobile/bind_iosapp.go b/cmd/gomobile/bind_iosapp.go
 index ca3815e..7f2001d 100644
 --- a/cmd/gomobile/bind_iosapp.go
@@ -18,55 +12,23 @@ index ca3815e..7f2001d 100644
  			headerPath:    "Headers",
  			binaryPath:    ".",
 diff --git a/cmd/gomobile/build.go b/cmd/gomobile/build.go
-index 2114a71..6e7bd1b 100644
+index 539ab1d..e14169e 100644
 --- a/cmd/gomobile/build.go
 +++ b/cmd/gomobile/build.go
-@@ -234,22 +234,25 @@ func printcmd(format string, args ...interface{}) {
- 
- // "Build flags", used by multiple commands.
- var (
--	buildA          bool        // -a
--	buildI          bool        // -i
--	buildN          bool        // -n
--	buildV          bool        // -v
--	buildX          bool        // -x
--	buildO          string      // -o
--	buildGcflags    string      // -gcflags
--	buildLdflags    string      // -ldflags
--	buildOverlay    string      // -overlay
--	buildTarget     string      // -target
--	buildTrimpath   bool        // -trimpath
--	buildWork       bool        // -work
--	buildBundleID   string      // -bundleid
--	buildIOSVersion string      // -iosversion
--	buildAndroidAPI int         // -androidapi
--	buildTags       stringsFlag // -tags
-+	buildA            bool        // -a
-+	buildI            bool        // -i
-+	buildN            bool        // -n
-+	buildV            bool        // -v
-+	buildX            bool        // -x
-+	buildO            string      // -o
-+	buildGcflags      string      // -gcflags
-+	buildLdflags      string      // -ldflags
-+	buildOverlay      string      // -overlay
-+	buildTarget       string      // -target
-+	buildTrimpath     bool        // -trimpath
-+	buildWork         bool        // -work
-+	buildBundleID     string      // -bundleid
-+	buildIOSVersion   string      // -iosversion
+@@ -251,6 +251,8 @@ var (
+ 	buildWork         bool        // -work
+ 	buildBundleID     string      // -bundleid
+ 	buildIOSVersion   string      // -iosversion
 +	buildTVOSVersion  string      // -tvosversion
 +	buildXROSVersion  string      // -xrosversion
-+	buildMacOSVersion string      // -macosversion
-+	buildAndroidAPI   int         // -androidapi
-+	buildTags         stringsFlag // -tags
- )
- 
- func addBuildFlags(cmd *command) {
-@@ -260,6 +263,9 @@ func addBuildFlags(cmd *command) {
+ 	buildMacOSVersion string      // -macosversion
+ 	buildAndroidAPI   int         // -androidapi
+ 	buildTags         stringsFlag // -tags
+@@ -264,7 +266,9 @@ func addBuildFlags(cmd *command) {
  	cmd.flag.StringVar(&buildTarget, "target", "android", "")
  	cmd.flag.StringVar(&buildBundleID, "bundleid", "", "")
  	cmd.flag.StringVar(&buildIOSVersion, "iosversion", "13.0", "")
+-	cmd.flag.StringVar(&buildMacOSVersion, "macosversion", "", "")
 +	cmd.flag.StringVar(&buildTVOSVersion, "tvosversion", "13.0", "")
 +	cmd.flag.StringVar(&buildXROSVersion, "xrosversion", "1.0", "")
 +	cmd.flag.StringVar(&buildMacOSVersion, "macosversion", "11.0", "")
@@ -74,7 +36,7 @@ index 2114a71..6e7bd1b 100644
  
  	cmd.flag.BoolVar(&buildA, "a", false, "")
 diff --git a/cmd/gomobile/env.go b/cmd/gomobile/env.go
-index 6dab96e..6bf06ae 100644
+index 42a9406..ded358e 100644
 --- a/cmd/gomobile/env.go
 +++ b/cmd/gomobile/env.go
 @@ -35,13 +35,13 @@ func isApplePlatform(platform string) bool {
@@ -114,7 +76,7 @@ index 6dab96e..6bf06ae 100644
  	default:
  		panic(fmt.Sprintf("unexpected platform: %s", platform))
  	}
-@@ -252,6 +256,29 @@ func envInit() (err error) {
+@@ -255,6 +259,29 @@ func envInit() (err error) {
  				if arch == "arm64" {
  					cflags += " -fembed-bitcode"
  				}
