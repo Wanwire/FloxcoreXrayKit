@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	xraycoreapplog "github.com/xtls/xray-core/app/log"
+	xraycoreappstats "github.com/xtls/xray-core/app/stats"
 	xraycorecommonlog "github.com/xtls/xray-core/common/log"
 	xraycorefilesystem "github.com/xtls/xray-core/common/platform/filesystem"
 	"github.com/xtls/xray-core/core"
@@ -180,6 +181,72 @@ func (controller *XrayCoreController) doStop() error {
 	}
 
 	return nil
+}
+
+// QueryOutboundTraffic returns the number of bytes transferred over every
+// outbound connection since the core was started, serialized into a single
+// string so it can cross the gomobile binding boundary.
+//
+// The result is a sequence of ";"-terminated records, two per outbound tag:
+//
+//	<tag>,up,<uplinkBytes>;<tag>,down,<downlinkBytes>;
+//
+// Counters are read without being reset, so the values are cumulative. An empty
+// string is returned when the core is not running or no outbound traffic has
+// been recorded.
+func (controller *XrayCoreController) QueryOutboundTraffic() string {
+	controller.coreMutex.Lock()
+	statsManager := controller.statsManager
+	controller.coreMutex.Unlock()
+
+	// VisitCounters is only exposed by the concrete stats manager, not the
+	// features/stats.Manager interface, so we type-assert to reach it. The
+	// assertion also fails when the core is stopped and the manager is nil.
+	manager, ok := statsManager.(*xraycoreappstats.Manager)
+	if !ok {
+		return ""
+	}
+
+	// Collect both directions per outbound tag. Traffic counters are named
+	// "outbound>>>[tag]>>>traffic>>>[uplink|downlink]". The tags slice preserves
+	// the order in which tags are first seen so output is stable within a call.
+	type traffic struct{ up, down int64 }
+	byTag := make(map[string]*traffic)
+	var tags []string
+	manager.VisitCounters(func(name string, counter xraycorestats.Counter) bool {
+		parts := strings.Split(name, ">>>")
+		if len(parts) != 4 || parts[0] != "outbound" || parts[2] != "traffic" {
+			return true
+		}
+		tag := parts[1]
+		t := byTag[tag]
+		if t == nil {
+			t = &traffic{}
+			byTag[tag] = t
+			tags = append(tags, tag)
+		}
+		switch parts[3] {
+		case "uplink":
+			t.up = counter.Value()
+		case "downlink":
+			t.down = counter.Value()
+		}
+		return true
+	})
+
+	var b strings.Builder
+	for _, tag := range tags {
+		t := byTag[tag]
+		b.WriteString(tag)
+		b.WriteString(",up,")
+		b.WriteString(strconv.FormatInt(t.up, 10))
+		b.WriteByte(';')
+		b.WriteString(tag)
+		b.WriteString(",down,")
+		b.WriteString(strconv.FormatInt(t.down, 10))
+		b.WriteByte(';')
+	}
+	return b.String()
 }
 
 func XrayCoreVersion() string {
