@@ -32,6 +32,15 @@ Task {
     }
 }
 
+/* Query the data transferred over the outbounds */
+let traffic = controller.queryOutboundTraffic()
+print("Sent: \(traffic.totalSent) bytes, received: \(traffic.totalReceived) bytes")
+
+/* Inspect the transferred data per outbound tag */
+for outbound in traffic {
+    print("\(outbound.tag): sent \(outbound.sent), received \(outbound.received)")
+}
+
 /* Stop XrayCore */
 Task {
     await controller.stop()

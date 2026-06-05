@@ -16,6 +16,24 @@ public protocol XrayCoreManagerProtocol {
     func onStop()
 }
 
+/// Cumulative traffic transferred over a single outbound connection since the
+/// core was started.
+public struct OutboundTraffic {
+    /// The outbound tag this traffic is accounted to.
+    public let tag: String
+    /// Bytes sent (uplink) over this outbound.
+    public let sent: Int64
+    /// Bytes received (downlink) over this outbound.
+    public let received: Int64
+}
+
+public extension Array where Element == OutboundTraffic {
+    /// Total bytes sent (uplink) across all outbounds.
+    var totalSent: Int64 { reduce(0) { $0 + $1.sent } }
+    /// Total bytes received (downlink) across all outbounds.
+    var totalReceived: Int64 { reduce(0) { $0 + $1.received } }
+}
+
 public class XrayCoreManager {
     private class XrayCoreManagerCallbackHandler: NSObject, LibxraygoXrayCoreCallbackHandlerProtocol {
         var onEmitStatusCb: ((Int, String?) -> ())? = nil
@@ -173,6 +191,41 @@ public class XrayCoreManager {
     
     public func stop() {
         controller?.stop()
+    }
+
+    /// Returns the cumulative traffic transferred over each outbound connection
+    /// since the core was started, one entry per outbound tag.
+    ///
+    /// Values are read without resetting the underlying counters. Use
+    /// `totalSent` / `totalReceived` on the result for grand totals. Returns an
+    /// empty array when the core is not running or no traffic has been recorded.
+    public func queryOutboundTraffic() -> [OutboundTraffic] {
+        guard let raw = controller?.queryOutboundTraffic(), !raw.isEmpty else {
+            return []
+        }
+
+        // The Go layer serializes traffic as ";"-terminated "tag,direction,bytes"
+        // records, emitting an "up" and a "down" record for every outbound tag.
+        var byTag: [String: (sent: Int64, received: Int64)] = [:]
+        var order: [String] = []
+        for record in raw.split(separator: ";") {
+            let fields = record.split(separator: ",")
+            guard fields.count == 3, let bytes = Int64(fields[2]) else { continue }
+            let tag = String(fields[0])
+            if byTag[tag] == nil {
+                byTag[tag] = (0, 0)
+                order.append(tag)
+            }
+            switch String(fields[1]) {
+            case "up": byTag[tag]?.sent = bytes
+            case "down": byTag[tag]?.received = bytes
+            default: break
+            }
+        }
+
+        return order.map { tag in
+            OutboundTraffic(tag: tag, sent: byTag[tag]?.sent ?? 0, received: byTag[tag]?.received ?? 0)
+        }
     }
 }
 
