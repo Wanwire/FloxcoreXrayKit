@@ -143,7 +143,7 @@ func (controller *XrayCoreController) doStart(configContent string) error {
 		errorString := fmt.Sprintf("xray-core start failed: %s", err)
 		fmt.Printf("xray-core failed to start: %s\n", errorString)
 		controller.CallbackHandler.OnStartFailure(errorString)
-		return fmt.Errorf(errorString)
+		return fmt.Errorf("%s", errorString)
 	}
 
 	controller.CallbackHandler.OnStart()
