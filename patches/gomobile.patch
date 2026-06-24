@@ -76,7 +76,7 @@ index 42a9406..ded358e 100644
  	default:
  		panic(fmt.Sprintf("unexpected platform: %s", platform))
  	}
-@@ -255,6 +259,29 @@ func envInit() (err error) {
+@@ -255,6 +259,31 @@ func envInit() (err error) {
  				if arch == "arm64" {
  					cflags += " -fembed-bitcode"
  				}
@@ -97,11 +97,13 @@ index 42a9406..ded358e 100644
 +				goos = "ios"
 +				sdk = "xros"
 +				clang, cflags, err = envClang(sdk)
++				cflags += " -mtargetos=xros" + buildXROSVersion
 +				cflags += " -fembed-bitcode"
 +			case "xrsimulator":
 +				goos = "ios"
 +				sdk = "xrsimulator"
 +				clang, cflags, err = envClang(sdk)
++				cflags += " -mtargetos=xros" + buildXROSVersion + "-simulator"
 +				cflags += " -fembed-bitcode"
  			default:
  				panic(fmt.Errorf("unknown Apple target: %s/%s", platform, arch))

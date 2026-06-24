@@ -19,6 +19,7 @@ jobs:
 
     env:
       FRAMEWORK_FILENAME: LibXrayGo.xcframework
+      GOMOBILE_TARGETS: ios,iossimulator,macos,maccatalyst,appletvos,appletvsimulator,xros,xrsimulator
 
     steps:
       - uses: actions/checkout@v6
@@ -39,10 +40,25 @@ jobs:
           export PATH=/tmp/mobile/:$PATH
           echo "PATH=$PATH" >> $GITHUB_ENV
 
+      - name: Read package platform versions
+        run: |
+            IOS_VERSION=$(perl -0ne 'print "$1.0" if /\.iOS\(\.v([0-9]+)\)/' Package.swift)
+            MACOS_VERSION=$(perl -0ne 'print "$1.0" if /\.macOS\(\.v([0-9]+)\)/' Package.swift)
+            TVOS_VERSION=$(perl -0ne 'print "$1.0" if /\.tvOS\(\.v([0-9]+)\)/' Package.swift)
+            XROS_VERSION=$(perl -0ne 'print "$1.0" if /\.visionOS\(\.v([0-9]+)\)/' Package.swift)
+            test -n "$IOS_VERSION"
+            test -n "$MACOS_VERSION"
+            test -n "$TVOS_VERSION"
+            test -n "$XROS_VERSION"
+            echo "IOS_VERSION=$IOS_VERSION" >> $GITHUB_ENV
+            echo "MACOS_VERSION=$MACOS_VERSION" >> $GITHUB_ENV
+            echo "TVOS_VERSION=$TVOS_VERSION" >> $GITHUB_ENV
+            echo "XROS_VERSION=$XROS_VERSION" >> $GITHUB_ENV
+
       - name: Build xcframework
         run: |
             gomobile init
-            gomobile bind -target ios,iossimulator,macos,maccatalyst,appletvos,appletvsimulator,xros,xrsimulator -iosversion=16 -tvosversion=17 -x -o ${{ env.FRAMEWORK_FILENAME }}
+            gomobile bind -target "$GOMOBILE_TARGETS" -iosversion="$IOS_VERSION" -macosversion="$MACOS_VERSION" -tvosversion="$TVOS_VERSION" -xrosversion="$XROS_VERSION" -x -o "$FRAMEWORK_FILENAME"
 
       - name: Archive xcframework
         run: zip -r ${{ env.FRAMEWORK_FILENAME }}.zip ${{ env.FRAMEWORK_FILENAME }}
