@@ -192,6 +192,11 @@ func (controller *XrayCoreController) doStop() error {
 		controller.coreInstance = nil
 	}
 
+	// Return the freed pages to the OS now, while coreMutex is still held:
+	// a configuration reload must not start the next instance before the
+	// memory of the old instance is gone, or both are resident at once
+	debug.FreeOSMemory()
+
 	return nil
 }
 
