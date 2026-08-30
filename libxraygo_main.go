@@ -125,7 +125,9 @@ func (controller *XrayCoreController) Start(configContent string) {
 
 	if controller.IsRunning {
 		fmt.Println("XrayCoreController.Start: already running")
-		return // Already running.
+		// Report the failure, or a task that awaits the start callback waits forever
+		controller.CallbackHandler.OnStartFailure("already running")
+		return
 	}
 
 	controller.doStart(configContent)
@@ -171,7 +173,9 @@ func (controller *XrayCoreController) Stop() {
 
 	if !controller.IsRunning {
 		fmt.Println("XrayCoreController.Stop: not running")
-		return // Not running.
+		// Confirm the stopped state, or a caller that waits for the stop callback waits forever
+		controller.CallbackHandler.OnStop()
+		return
 	}
 
 	controller.doStop()
