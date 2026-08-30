@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,17 @@ const (
 	envLocationAsset = "xray.location.asset"
 	envTunFd = "xray.tun.fd"
 )
+
+// The Go runtime memory limit. On iOS the network extension process is killed
+// at about 50 MB, so the garbage collector must work hard before that point.
+// The limit is soft: the runtime collects more often and returns free pages
+// eagerly near the limit, but it exceeds the limit instead of thrashing or
+// panicking (garbage collection stays capped at 50% CPU).
+const memoryLimitBytes = 35 << 20
+
+func init() {
+	debug.SetMemoryLimit(memoryLimitBytes)
+}
 
 type XrayCoreCallbackHandler interface {
 	OnStart() int
