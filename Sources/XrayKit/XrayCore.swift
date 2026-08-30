@@ -125,19 +125,22 @@ public class XrayCoreManager {
     
     private func started() {
         startCompletion?(nil)
+        startCompletion = nil
         callbackHandler?.onStart()
     }
-    
+
     private func startFailed(_ message: String?) {
         if let message = message, message.starts(with: "config error") {
             let error = XrayCoreStartError.invalidConfiguration(message)
             startCompletion?(error)
+            startCompletion = nil
             callbackHandler?.onStartFailure(message: message)
             return
         }
 
         let error = XrayCoreStartError.connectionFailed(message ?? "")
         startCompletion?(error)
+        startCompletion = nil
         callbackHandler?.onStartFailure(message: message)
     }
     
@@ -174,6 +177,13 @@ public class XrayCoreManager {
             let error = XrayCoreStartError.connectionFailed("No controller")
             completion(error)
             return
+        }
+
+        // A new start supersedes a pending one; complete the pending start so
+        // its waiting task does not stay suspended forever
+        if let pendingCompletion = startCompletion {
+            startCompletion = nil
+            pendingCompletion(.connectionFailed("superseded by a new start"))
         }
 
         startCompletion = completion
