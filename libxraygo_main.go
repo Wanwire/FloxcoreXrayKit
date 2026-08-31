@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,8 +39,15 @@ const (
 // panicking (garbage collection stays capped at 50% CPU).
 const memoryLimitBytes = 35 << 20
 
+// The default sampling rate of 512 KB cannot resolve a heap that is spread
+// thinly across hundreds of sites — every record comes back as a single
+// sample. 16 KB gives 32x the resolution at a moderate CPU cost and keeps
+// GoHeapProfile usable on a live tunnel.
+const memProfileRateBytes = 16 * 1024
+
 func init() {
 	debug.SetMemoryLimit(memoryLimitBytes)
+	runtime.MemProfileRate = memProfileRateBytes
 }
 
 type XrayCoreCallbackHandler interface {
@@ -272,4 +282,139 @@ func (controller *XrayCoreController) QueryOutboundTraffic() string {
 
 func XrayCoreVersion() string {
 	return fmt.Sprintf("Xray-Core %s", xraycore.Version())
+}
+
+// GoMemoryStats reports the Go runtime memory counters, serialized into a single
+// string so the values can cross the gomobile binding boundary:
+//
+//	heapinuse=<n>,heapalloc=<n>,heapreleased=<n>,heapsys=<n>,stacksys=<n>,sys=<n>,goroutines=<n>
+//
+// All sizes are in bytes. heapreleased counts memory returned to the operating
+// system, which is what separates a shrinking Go heap from a shrinking process
+// footprint.
+func GoMemoryStats() string {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return fmt.Sprintf("heapinuse=%d,heapalloc=%d,heapreleased=%d,heapsys=%d,stacksys=%d,sys=%d,goroutines=%d",
+		m.HeapInuse, m.HeapAlloc, m.HeapReleased, m.HeapSys, m.StackSys, m.Sys, runtime.NumGoroutine())
+}
+
+// GoHeapProfile reports the allocation sites holding the most live heap memory,
+// largest first, one per line:
+//
+//	<inUseKB>KB x<objects> <function> <- <caller> <- <caller>
+//
+// Sizes come from the sampling profiler (runtime.MemProfileRate), so they are
+// proportional estimates rather than exact totals. This is the measurement that
+// names what is retaining memory when FreeOSMemory cannot give it back.
+func GoHeapProfile(top int) string {
+	// MemProfile reports the state as of the most recent completed collection.
+	runtime.GC()
+
+	var records []runtime.MemProfileRecord
+	n, ok := runtime.MemProfile(nil, false)
+	for attempt := 0; attempt < 5; attempt++ {
+		records = make([]runtime.MemProfileRecord, n+64)
+		n, ok = runtime.MemProfile(records, false)
+		if ok {
+			records = records[:n]
+			break
+		}
+	}
+	if !ok {
+		return "heap profile unavailable"
+	}
+
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].InUseBytes() > records[j].InUseBytes()
+	})
+	if top <= 0 || top > len(records) {
+		top = len(records)
+	}
+
+	rate := int64(runtime.MemProfileRate)
+
+	// Total across every record, so the caller can see how much of the heap the
+	// listed sites actually account for. A large gap between the total and
+	// heapinuse means the heap is genuinely diffuse rather than concentrated.
+	var totalBytes int64
+	var liveRecords int
+	for _, record := range records {
+		if record.InUseBytes() == 0 {
+			continue
+		}
+		liveRecords++
+		_, bytes := scaleHeapSample(record.InUseObjects(), record.InUseBytes(), rate)
+		totalBytes += bytes
+	}
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "rate=%dKB sites=%d profiled=%dKB heapinuse=%dKB (profile covers %d%%)\n",
+		rate/1024, liveRecords, totalBytes/1024, memStats.HeapInuse/1024,
+		percent(totalBytes, int64(memStats.HeapInuse)))
+
+	var listedBytes int64
+	for i := 0; i < top; i++ {
+		record := records[i]
+		if record.InUseBytes() == 0 {
+			break
+		}
+		objects, bytes := scaleHeapSample(record.InUseObjects(), record.InUseBytes(), rate)
+		listedBytes += bytes
+		fmt.Fprintf(&b, "%dKB x%d %s\n", bytes/1024, objects, callSite(record.Stack()))
+	}
+	fmt.Fprintf(&b, "(top %d = %dKB, %d%% of profiled)\n",
+		top, listedBytes/1024, percent(listedBytes, totalBytes))
+	return b.String()
+}
+
+func percent(part, whole int64) int64 {
+	if whole <= 0 {
+		return 0
+	}
+	return part * 100 / whole
+}
+
+// scaleHeapSample reverses the runtime's allocation sampling the same way
+// runtime/pprof does, so the reported sizes approximate real live bytes instead
+// of sampled bytes.
+func scaleHeapSample(count, size, rate int64) (int64, int64) {
+	if count == 0 || size == 0 {
+		return 0, 0
+	}
+	// rate == 1 means every allocation was recorded, so nothing to correct for.
+	if rate <= 1 {
+		return count, size
+	}
+	averageSize := float64(size) / float64(count)
+	scale := 1 / (1 - math.Exp(-averageSize/float64(rate)))
+	return int64(float64(count) * scale), int64(float64(size) * scale)
+}
+
+// callSite names the first few non-runtime frames of a profile record, so the
+// line points at the code that asked for the memory rather than at the
+// allocator.
+func callSite(stack []uintptr) string {
+	frames := runtime.CallersFrames(stack)
+	var parts []string
+	for len(parts) < 3 {
+		frame, more := frames.Next()
+		if frame.Function != "" && !strings.HasPrefix(frame.Function, "runtime.") {
+			name := frame.Function
+			if index := strings.LastIndex(name, "/"); index >= 0 {
+				name = name[index+1:]
+			}
+			parts = append(parts, name)
+		}
+		if !more {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return "unknown"
+	}
+	return strings.Join(parts, " <- ")
 }

@@ -239,8 +239,69 @@ public class XrayCoreManager {
     }
 }
 
+/// A snapshot of the Go runtime memory counters inside the Xray core. All sizes
+/// are in bytes.
+public struct GoMemoryStats {
+    /// Bytes in in-use heap spans.
+    public let heapInUse: UInt64
+    /// Bytes of allocated, still reachable heap objects.
+    public let heapAllocated: UInt64
+    /// Bytes returned to the operating system. The gap between a shrinking heap
+    /// and a shrinking process footprint shows up here.
+    public let heapReleased: UInt64
+    /// Bytes of heap memory obtained from the operating system.
+    public let heapSystem: UInt64
+    /// Bytes of stack memory obtained from the operating system.
+    public let stackSystem: UInt64
+    /// Total bytes obtained from the operating system.
+    public let system: UInt64
+    /// Number of live goroutines, a direct proxy for live connections.
+    public let goroutines: Int
+
+    /// Parses the ","-separated "key=value" form produced by the Go layer.
+    fileprivate init?(serialized: String) {
+        var values: [String: UInt64] = [:]
+        for field in serialized.split(separator: ",") {
+            let parts = field.split(separator: "=")
+            guard parts.count == 2, let value = UInt64(parts[1]) else { continue }
+            values[String(parts[0])] = value
+        }
+        guard
+            let heapInUse = values["heapinuse"],
+            let heapAllocated = values["heapalloc"],
+            let heapReleased = values["heapreleased"],
+            let heapSystem = values["heapsys"],
+            let stackSystem = values["stacksys"],
+            let system = values["sys"],
+            let goroutines = values["goroutines"]
+        else {
+            return nil
+        }
+        self.heapInUse = heapInUse
+        self.heapAllocated = heapAllocated
+        self.heapReleased = heapReleased
+        self.heapSystem = heapSystem
+        self.stackSystem = stackSystem
+        self.system = system
+        self.goroutines = Int(goroutines)
+    }
+}
+
 public enum XrayCore {
     public static let controller: XrayCoreManager = XrayCoreManager()
+
+    /// Reads the Go runtime memory counters. Returns nil when the values cannot
+    /// be parsed.
+    public static func memoryStats() -> GoMemoryStats? {
+        GoMemoryStats(serialized: LibxraygoGoMemoryStats())
+    }
+
+    /// The allocation sites holding the most live heap memory, largest first,
+    /// one per line. Runs a garbage collection first, so it is not cheap — call
+    /// it when diagnosing retention, not on a timer.
+    public static func heapProfile(top: Int = 12) -> String {
+        LibxraygoGoHeapProfile(top)
+    }
     
     public static func run(config: Data, assets: URL) -> Result<Void, NEVPNError> {
         guard let dataStr = String(data: config, encoding: .utf8) else {
