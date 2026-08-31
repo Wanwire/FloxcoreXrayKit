@@ -296,6 +296,12 @@ public enum XrayCore {
         GoMemoryStats(serialized: LibxraygoGoMemoryStats())
     }
 
+    /// Runs a garbage collection and returns as much unused memory to the
+    /// operating system as the Go runtime can. Blocks until it completes.
+    public static func freeOSMemory() {
+        LibxraygoGoFreeOSMemory()
+    }
+
     /// The allocation sites holding the most live heap memory, largest first,
     /// one per line. Runs a garbage collection first, so it is not cheap — call
     /// it when diagnosing retention, not on a timer.

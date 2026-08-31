@@ -299,6 +299,12 @@ func GoMemoryStats() string {
 		m.HeapInuse, m.HeapAlloc, m.HeapReleased, m.HeapSys, m.StackSys, m.Sys, runtime.NumGoroutine())
 }
 
+// GoFreeOSMemory runs a garbage collection and returns as much unused memory to
+// the operating system as the runtime can.
+func GoFreeOSMemory() {
+	debug.FreeOSMemory()
+}
+
 // GoHeapProfile reports the allocation sites holding the most live heap memory,
 // largest first, one per line:
 //
