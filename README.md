@@ -4,6 +4,17 @@
   
 [Download](https://github.com/Wanwire/FloxcoreXrayKit/releases/latest "download latest release")
 
+### xray-core patches
+The build uses xray-core with the patches in `patches/xray-core`. `make xray-core`
+copies the xray-core version that `go.mod` requires to `.tmp/xray-core` and applies
+the patches; `go.mod` replaces xray-core with that directory. `make` and the release
+workflow do this step first. After you change the xray-core version in `go.mod`,
+make sure that the patches still apply.
+
+- `dns-log.patch`: when the log config sets `dnsLog`, the DNS log shows each DNS
+  query that passes through the dispatcher, with its ID, tries, result code and time
+  to reply, or that no reply came. Without `dnsLog`, xray-core works as without the patch.
+
 ### Usage
 ```swift
 import XrayKit

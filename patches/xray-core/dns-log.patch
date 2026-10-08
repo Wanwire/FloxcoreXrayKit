@@ -1,0 +1,503 @@
+diff --git a/app/dispatcher/default.go b/app/dispatcher/default.go
+index 2717df5f..91611b1d 100644
+--- a/app/dispatcher/default.go
++++ b/app/dispatcher/default.go
+@@ -501,5 +501,6 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
+ 		log.Record(accessMessage)
+ 	}
+ 
++	link = trackDNS(ctx, link, destination, inTag, handler.Tag())
+ 	handler.Dispatch(ctx, link)
+ }
+diff --git a/app/dispatcher/dnslog.go b/app/dispatcher/dnslog.go
+new file mode 100644
+index 00000000..3cd1ef2d
+--- /dev/null
++++ b/app/dispatcher/dnslog.go
+@@ -0,0 +1,267 @@
++package dispatcher
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/xtls/xray-core/common"
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/log"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/transport"
++	"golang.org/x/net/dns/dnsmessage"
++)
++
++// dnsTracker matches the DNS queries and replies of one UDP flow to port 53.
++// It writes one DNS log line per query: when the reply arrives, or when the
++// flow ends without a reply.
++type dnsTracker struct {
++	sync.Mutex
++	server   string
++	route    string
++	now      func() time.Time
++	record   func(*log.DNSLog)
++	pending  map[uint16]*dnsQuery
++	finished bool
++}
++
++type dnsQuery struct {
++	question string
++	sent     time.Time
++	tries    int
++}
++
++func newDNSTracker(server, route string) *dnsTracker {
++	return &dnsTracker{
++		server:  server,
++		route:   route,
++		now:     time.Now,
++		record:  func(l *log.DNSLog) { log.Record(l) },
++		pending: make(map[uint16]*dnsQuery),
++	}
++}
++
++// query records a packet from the client
++func (t *dnsTracker) query(packet []byte) {
++	var parser dnsmessage.Parser
++	header, err := parser.Start(packet)
++	if err != nil || header.Response {
++		return
++	}
++	question := "?"
++	if q, err := parser.Question(); err == nil {
++		question = q.Name.String() + " " + strings.TrimPrefix(q.Type.String(), "Type")
++	}
++
++	t.Lock()
++	defer t.Unlock()
++	if t.finished {
++		return
++	}
++	if q, found := t.pending[header.ID]; found {
++		q.tries++
++		return
++	}
++	t.pending[header.ID] = &dnsQuery{question: question, sent: t.now(), tries: 1}
++}
++
++// reply records a packet from the server
++func (t *dnsTracker) reply(packet []byte) {
++	var parser dnsmessage.Parser
++	header, err := parser.Start(packet)
++	if err != nil || !header.Response {
++		return
++	}
++	var ips []net.IP
++	if parser.SkipAllQuestions() == nil {
++		for {
++			answer, err := parser.Answer()
++			if err != nil {
++				break
++			}
++			switch body := answer.Body.(type) {
++			case *dnsmessage.AResource:
++				ips = append(ips, net.IP(body.A[:]))
++			case *dnsmessage.AAAAResource:
++				ips = append(ips, net.IP(body.AAAA[:]))
++			}
++		}
++	}
++
++	t.Lock()
++	q, found := t.pending[header.ID]
++	if found {
++		delete(t.pending, header.ID)
++	}
++	t.Unlock()
++	if !found {
++		return
++	}
++
++	var replyErr error
++	if header.RCode != dnsmessage.RCodeSuccess {
++		replyErr = errors.New(strings.TrimPrefix(header.RCode.String(), "RCode"))
++	}
++	elapsed := t.now().Sub(q.sent)
++	if elapsed <= 0 {
++		elapsed = time.Nanosecond
++	}
++	t.record(&log.DNSLog{
++		Server:  t.server,
++		Domain:  t.describe(header.ID, q),
++		Result:  ips,
++		Status:  log.DNSQueried,
++		Elapsed: elapsed,
++		Error:   replyErr,
++	})
++}
++
++// finish logs the queries without a reply
++func (t *dnsTracker) finish() {
++	t.Lock()
++	if t.finished {
++		t.Unlock()
++		return
++	}
++	t.finished = true
++	pending := t.pending
++	t.pending = nil
++	t.Unlock()
++
++	for id, q := range pending {
++		t.record(&log.DNSLog{
++			Server:  t.server,
++			Domain:  t.describe(id, q),
++			Status:  log.DNSNoReply,
++			Elapsed: max(t.now().Sub(q.sent).Round(time.Millisecond), time.Millisecond),
++		})
++	}
++}
++
++func (t *dnsTracker) describe(id uint16, q *dnsQuery) string {
++	return fmt.Sprintf("%s id=0x%04X tries=%d %s", q.question, id, q.tries, t.route)
++}
++
++// dnsPeekTimeout limits the wait for the first query of a flow
++const dnsPeekTimeout = 200 * time.Millisecond
++
++type dnsTrackingReader struct {
++	buf.Reader
++	tracker *dnsTracker
++	// The first packets, read before the outbound connects
++	cacheLock sync.Mutex
++	cache     buf.MultiBuffer
++}
++
++// peek reads the first packets of the flow before the outbound reads them.
++// An outbound that cannot connect never reads its link, and its queries would
++// otherwise not show in the log.
++func (r *dnsTrackingReader) peek(reader buf.TimeoutReader) {
++	mb, _ := reader.ReadMultiBufferTimeout(dnsPeekTimeout)
++	r.observe(mb)
++	r.cacheLock.Lock()
++	r.cache = mb
++	r.cacheLock.Unlock()
++}
++
++func (r *dnsTrackingReader) takeCache() buf.MultiBuffer {
++	r.cacheLock.Lock()
++	defer r.cacheLock.Unlock()
++	mb := r.cache
++	r.cache = nil
++	return mb
++}
++
++func (r *dnsTrackingReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
++	if mb := r.takeCache(); !mb.IsEmpty() {
++		return mb, nil
++	}
++	mb, err := r.Reader.ReadMultiBuffer()
++	r.observe(mb)
++	return mb, err
++}
++
++func (r *dnsTrackingReader) observe(mb buf.MultiBuffer) {
++	for _, b := range mb {
++		if b.UDP == nil || b.UDP.Port == 53 {
++			r.tracker.query(b.Bytes())
++		}
++	}
++}
++
++func (r *dnsTrackingReader) Interrupt() {
++	r.tracker.finish()
++	buf.ReleaseMulti(r.takeCache())
++	common.Interrupt(r.Reader)
++}
++
++func (r *dnsTrackingReader) Close() error {
++	return common.Close(r.Reader)
++}
++
++// dnsTrackingTimeoutReader keeps the buf.TimeoutReader interface of the
++// wrapped reader, because outbounds check for it
++type dnsTrackingTimeoutReader struct {
++	dnsTrackingReader
++}
++
++func (r *dnsTrackingTimeoutReader) ReadMultiBufferTimeout(timeout time.Duration) (buf.MultiBuffer, error) {
++	if mb := r.takeCache(); !mb.IsEmpty() {
++		return mb, nil
++	}
++	mb, err := r.Reader.(buf.TimeoutReader).ReadMultiBufferTimeout(timeout)
++	r.observe(mb)
++	return mb, err
++}
++
++type dnsTrackingWriter struct {
++	buf.Writer
++	tracker *dnsTracker
++}
++
++func (w *dnsTrackingWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
++	for _, b := range mb {
++		if b.UDP == nil || b.UDP.Port == 53 {
++			w.tracker.reply(b.Bytes())
++		}
++	}
++	return w.Writer.WriteMultiBuffer(mb)
++}
++
++func (w *dnsTrackingWriter) Close() error {
++	w.tracker.finish()
++	return common.Close(w.Writer)
++}
++
++func (w *dnsTrackingWriter) Interrupt() {
++	w.tracker.finish()
++	common.Interrupt(w.Writer)
++}
++
++// trackDNS wraps the link of a UDP flow to port 53, so the DNS log shows each
++// query with its ID, tries, result code and time to reply, or that no reply came.
++// Without the DNS log, it returns the link as it is.
++func trackDNS(ctx context.Context, link *transport.Link, destination net.Destination, inboundTag, outboundTag string) *transport.Link {
++	if !log.DNSLogEnabled() || destination.Network != net.Network_UDP || destination.Port != 53 {
++		return link
++	}
++	route := "[" + inboundTag + " -> " + outboundTag + "]"
++	if inbound := session.InboundFromContext(ctx); inbound != nil && inbound.Source.IsValid() {
++		route += " from " + inbound.Source.NetAddr()
++	}
++	tracker := newDNSTracker(destination.NetAddr(), route)
++	tracked := &transport.Link{Writer: &dnsTrackingWriter{Writer: link.Writer, tracker: tracker}}
++	if timeoutReader, ok := link.Reader.(buf.TimeoutReader); ok {
++		reader := &dnsTrackingTimeoutReader{dnsTrackingReader{Reader: link.Reader, tracker: tracker}}
++		reader.peek(timeoutReader)
++		tracked.Reader = reader
++	} else {
++		tracked.Reader = &dnsTrackingReader{Reader: link.Reader, tracker: tracker}
++	}
++	return tracked
++}
+diff --git a/app/dispatcher/dnslog_test.go b/app/dispatcher/dnslog_test.go
+new file mode 100644
+index 00000000..b24e891b
+--- /dev/null
++++ b/app/dispatcher/dnslog_test.go
+@@ -0,0 +1,167 @@
++package dispatcher
++
++import (
++	"context"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common"
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/log"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/transport"
++	"github.com/xtls/xray-core/transport/pipe"
++	"golang.org/x/net/dns/dnsmessage"
++)
++
++func dnsPacket(t *testing.T, id uint16, response bool, rcode dnsmessage.RCode, a []byte) []byte {
++	t.Helper()
++	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: id, Response: response, RCode: rcode})
++	builder.EnableCompression()
++	name := dnsmessage.MustNewName("example.com.")
++	if err := builder.StartQuestions(); err != nil {
++		t.Fatal(err)
++	}
++	if err := builder.Question(dnsmessage.Question{Name: name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}); err != nil {
++		t.Fatal(err)
++	}
++	if a != nil {
++		if err := builder.StartAnswers(); err != nil {
++			t.Fatal(err)
++		}
++		var body dnsmessage.AResource
++		copy(body.A[:], a)
++		if err := builder.AResource(dnsmessage.ResourceHeader{Name: name, Class: dnsmessage.ClassINET, TTL: 60}, body); err != nil {
++			t.Fatal(err)
++		}
++	}
++	packet, err := builder.Finish()
++	if err != nil {
++		t.Fatal(err)
++	}
++	return packet
++}
++
++func newTestTracker() (*dnsTracker, *[]*log.DNSLog, *time.Time) {
++	clock := time.Unix(1_800_000_000, 0)
++	var records []*log.DNSLog
++	tracker := newDNSTracker("10.255.0.1:53", "[socks -> proxy]")
++	tracker.now = func() time.Time { return clock }
++	tracker.record = func(l *log.DNSLog) { records = append(records, l) }
++	return tracker, &records, &clock
++}
++
++func TestDNSTrackerLogsReply(t *testing.T) {
++	tracker, records, clock := newTestTracker()
++
++	tracker.query(dnsPacket(t, 0xFBE8, false, dnsmessage.RCodeSuccess, nil))
++	*clock = clock.Add(110 * time.Millisecond)
++	tracker.reply(dnsPacket(t, 0xFBE8, true, dnsmessage.RCodeSuccess, []byte{17, 253, 144, 10}))
++	tracker.finish()
++
++	if len(*records) != 1 {
++		t.Fatalf("got %d records, want 1", len(*records))
++	}
++	want := "10.255.0.1:53 got answer: example.com. A id=0xFBE8 tries=1 [socks -> proxy] -> [17.253.144.10] 110ms"
++	if got := (*records)[0].String(); got != want {
++		t.Errorf("got %q, want %q", got, want)
++	}
++}
++
++func TestDNSTrackerCountsRetries(t *testing.T) {
++	tracker, records, clock := newTestTracker()
++
++	tracker.query(dnsPacket(t, 0x0001, false, dnsmessage.RCodeSuccess, nil))
++	*clock = clock.Add(time.Second)
++	tracker.query(dnsPacket(t, 0x0001, false, dnsmessage.RCodeSuccess, nil))
++	*clock = clock.Add(50 * time.Millisecond)
++	tracker.reply(dnsPacket(t, 0x0001, true, dnsmessage.RCodeNameError, nil))
++
++	want := "10.255.0.1:53 got answer: example.com. A id=0x0001 tries=2 [socks -> proxy] -> [] 1.05s <NameError>"
++	if got := (*records)[0].String(); got != want {
++		t.Errorf("got %q, want %q", got, want)
++	}
++}
++
++func TestDNSTrackerLogsNoReplyWhenFlowEnds(t *testing.T) {
++	tracker, records, clock := newTestTracker()
++
++	tracker.query(dnsPacket(t, 0x0002, false, dnsmessage.RCodeSuccess, nil))
++	*clock = clock.Add(60 * time.Second)
++	tracker.finish()
++	tracker.finish()
++
++	if len(*records) != 1 {
++		t.Fatalf("got %d records, want 1", len(*records))
++	}
++	want := "10.255.0.1:53 no reply: example.com. A id=0x0002 tries=1 [socks -> proxy] -> [] 1m0s"
++	if got := (*records)[0].String(); got != want {
++		t.Errorf("got %q, want %q", got, want)
++	}
++}
++
++func TestDNSTrackerIgnoresUnknownReplyAndGarbage(t *testing.T) {
++	tracker, records, _ := newTestTracker()
++
++	tracker.reply(dnsPacket(t, 0x0003, true, dnsmessage.RCodeSuccess, nil))
++	tracker.query([]byte{1, 2, 3})
++	tracker.reply([]byte{1, 2, 3})
++	tracker.finish()
++
++	if len(*records) != 0 {
++		t.Fatalf("got %d records, want 0", len(*records))
++	}
++}
++
++func TestTrackDNSLeavesLinkWithoutDNSLog(t *testing.T) {
++	reader, writer := pipe.New(pipe.WithoutSizeLimit())
++	link := &transport.Link{Reader: reader, Writer: writer}
++
++	tracked := trackDNS(context.Background(), link, net.UDPDestination(net.ParseAddress("10.255.0.1"), 53), "socks", "proxy")
++
++	if tracked != link {
++		t.Fatal("trackDNS changed the link while the DNS log is off")
++	}
++}
++
++func TestTrackDNSLogsQueryThatOutboundNeverReads(t *testing.T) {
++	log.SetDNSLogEnabled(true)
++	defer log.SetDNSLogEnabled(false)
++	var records []*log.DNSLog
++	reader, writer := pipe.New(pipe.WithoutSizeLimit())
++	_, replyWriter := pipe.New(pipe.WithoutSizeLimit())
++	b := buf.New()
++	b.Write(dnsPacket(t, 0x0004, false, dnsmessage.RCodeSuccess, nil))
++	writer.WriteMultiBuffer(buf.MultiBuffer{b})
++
++	link := trackDNS(context.Background(), &transport.Link{Reader: reader, Writer: replyWriter}, net.UDPDestination(net.ParseAddress("10.255.0.1"), 53), "socks", "proxy")
++	tracker := link.Writer.(*dnsTrackingWriter).tracker
++	tracker.record = func(l *log.DNSLog) { records = append(records, l) }
++	// The outbound cannot connect, so it interrupts the link without reading it
++	common.Interrupt(link.Reader)
++
++	if len(records) != 1 || records[0].Status != log.DNSNoReply || !strings.Contains(records[0].Domain, "id=0x0004") {
++		t.Fatalf("got %v, want one record without a reply for id 0x0004", records)
++	}
++}
++
++func TestTrackDNSPassesCachedPacketToOutbound(t *testing.T) {
++	log.SetDNSLogEnabled(true)
++	defer log.SetDNSLogEnabled(false)
++	reader, writer := pipe.New(pipe.WithoutSizeLimit())
++	_, replyWriter := pipe.New(pipe.WithoutSizeLimit())
++	query := dnsPacket(t, 0x0005, false, dnsmessage.RCodeSuccess, nil)
++	b := buf.New()
++	b.Write(query)
++	writer.WriteMultiBuffer(buf.MultiBuffer{b})
++
++	link := trackDNS(context.Background(), &transport.Link{Reader: reader, Writer: replyWriter}, net.UDPDestination(net.ParseAddress("10.255.0.1"), 53), "socks", "proxy")
++	if _, ok := link.Reader.(buf.TimeoutReader); !ok {
++		t.Fatal("the tracked reader lost the buf.TimeoutReader interface")
++	}
++	mb, err := link.Reader.ReadMultiBuffer()
++	if err != nil || mb.Len() != int32(len(query)) {
++		t.Fatalf("got %d bytes and error %v, want the %d-byte query", mb.Len(), err, len(query))
++	}
++}
+diff --git a/app/log/log.go b/app/log/log.go
+index 553862b1..4d31fdf6 100644
+--- a/app/log/log.go
++++ b/app/log/log.go
+@@ -40,6 +40,7 @@ func New(ctx context.Context, config *Config) (*Instance, error) {
+ 		mask6:  m6,
+ 	}
+ 	log.RegisterHandler(g)
++	log.SetDNSLogEnabled(config.EnableDnsLog)
+ 
+ 	// start logger now,
+ 	// then other modules will be able to log during initialization
+diff --git a/common/log/dns.go b/common/log/dns.go
+index 91ecdb92..48014f15 100644
+--- a/common/log/dns.go
++++ b/common/log/dns.go
+@@ -3,6 +3,7 @@ package log
+ import (
+ 	"net"
+ 	"strings"
++	"sync/atomic"
+ 	"time"
+ )
+ 
+@@ -46,8 +47,21 @@ var (
+ 	DNSQueried        = dnsStatus("got answer:")
+ 	DNSCacheHit       = dnsStatus("cache HIT:")
+ 	DNSCacheOptimiste = dnsStatus("cache OPTIMISTE:")
++	DNSNoReply        = dnsStatus("no reply:")
+ )
+ 
++var dnsLogEnabled atomic.Bool
++
++// SetDNSLogEnabled records whether the log config enables the DNS log
++func SetDNSLogEnabled(enabled bool) {
++	dnsLogEnabled.Store(enabled)
++}
++
++// DNSLogEnabled tells whether the log config enables the DNS log
++func DNSLogEnabled() bool {
++	return dnsLogEnabled.Load()
++}
++
+ func joinNetIP(ips []net.IP) string {
+ 	if len(ips) == 0 {
+ 		return ""
