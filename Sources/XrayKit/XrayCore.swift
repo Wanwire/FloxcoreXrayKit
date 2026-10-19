@@ -203,6 +203,20 @@ public class XrayCoreManager {
         controller?.stop()
     }
 
+    /// Forgets the pooled XHTTP connections and checks the outbounds of the
+    /// burst observatory. Call it when the connections and the results of the
+    /// observatory may be stale, such as after the device slept (the `wake()`
+    /// of the tunnel provider): the balancers then stop using an outbound whose
+    /// connection broke during the sleep.
+    ///
+    /// Blocks until the check has finished, after at most the timeout of the
+    /// check, so call it off the main thread. Returns a description of what it
+    /// did and of the outbounds after the check, for the log.
+    @discardableResult
+    public func refreshConnections() -> String {
+        controller?.refreshConnections() ?? "no controller"
+    }
+
     /// Returns the cumulative traffic transferred over each outbound connection
     /// since the core was started, one entry per outbound tag.
     ///

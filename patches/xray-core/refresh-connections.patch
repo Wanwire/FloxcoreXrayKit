@@ -1,0 +1,60 @@
+diff --git a/transport/internet/splithttp/forget.go b/transport/internet/splithttp/forget.go
+new file mode 100644
+index 0000000..46e460f
+--- /dev/null
++++ b/transport/internet/splithttp/forget.go
+@@ -0,0 +1,26 @@
++package splithttp
++
++// ForgetConnections makes the next dials open new connections, and returns
++// the number of connections that it forgot. Call it when the connections may
++// be stale, such as after the device slept: a QUIC connection does not notice
++// that the NAT dropped its mapping while the device slept, so its new streams
++// hang. A forgotten connection closes when its running requests end, as when
++// XMUX stops reusing it.
++func ForgetConnections() int {
++	globalDialerAccess.Lock()
++	managers := globalDialerMap
++	globalDialerMap = nil
++	globalDialerAccess.Unlock()
++
++	// getHTTPClient uses a manager only while it holds the lock, so no dial
++	// uses these managers any more
++	forgotten := 0
++	for _, manager := range managers {
++		for _, xmuxClient := range manager.xmuxClients {
++			xmuxClient.NotUsed.Store(true)
++			xmuxClient.maybeClose()
++			forgotten++
++		}
++	}
++	return forgotten
++}
+diff --git a/app/observatory/burst/checksubjects.go b/app/observatory/burst/checksubjects.go
+new file mode 100644
+index 0000000..33bf1e5
+--- /dev/null
++++ b/app/observatory/burst/checksubjects.go
+@@ -0,0 +1,22 @@
++package burst
++
++import (
++	"github.com/xtls/xray-core/common/errors"
++	"github.com/xtls/xray-core/features/outbound"
++)
++
++// CheckSubjects checks the outbounds that the subject selector selects, as a
++// scheduled check does, and returns them. It returns when the check has put
++// its results, so the balancers use them from then on.
++func (o *Observer) CheckSubjects() ([]string, error) {
++	if o.config == nil || len(o.config.SubjectSelector) == 0 {
++		return nil, nil
++	}
++	hs, ok := o.ohm.(outbound.HandlerSelector)
++	if !ok {
++		return nil, errors.New("outbound.Manager is not a HandlerSelector")
++	}
++	tags := hs.Select(o.config.SubjectSelector)
++	o.hp.Check(tags)
++	return tags, nil
++}

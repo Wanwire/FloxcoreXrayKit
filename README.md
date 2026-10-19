@@ -14,6 +14,8 @@ make sure that the patches still apply.
 - `dns-log.patch`: when the log config sets `dnsLog`, the DNS log shows each DNS
   query that passes through the dispatcher, with its ID, tries, result code and time
   to reply, or that no reply came. Without `dnsLog`, xray-core works as without the patch.
+- `refresh-connections.patch`: adds `splithttp.ForgetConnections` and
+  `burst.Observer.CheckSubjects`, which `refreshConnections()` uses.
 
 ### Usage
 ```swift
@@ -50,6 +52,11 @@ print("Sent: \(traffic.totalSent) bytes, received: \(traffic.totalReceived) byte
 /* Inspect the transferred data per outbound tag */
 for outbound in traffic {
     print("\(outbound.tag): sent \(outbound.sent), received \(outbound.received)")
+}
+
+/* After the device slept, forget stale connections and check the outbounds again */
+Task.detached {
+    print(controller.refreshConnections())
 }
 
 /* Stop XrayCore */
