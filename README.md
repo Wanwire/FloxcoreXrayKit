@@ -14,6 +14,15 @@ make sure that the patches still apply.
 - `dns-log.patch`: when the log config sets `dnsLog`, the DNS log shows each DNS
   query that passes through the dispatcher, with its ID, tries, result code and time
   to reply, or that no reply came. Without `dnsLog`, xray-core works as without the patch.
+- `liveness-demote.patch`: with `demote` in the settings of a `leastLoad` balancer, e.g.
+  `{"failures": 3, "window": "20s", "replyTimeout": "5s", "minReplyBytes": 1}`, the
+  balancer passes over an outbound whose last connections within the window got no
+  reply, and none of whose connections got one lately, until its next health check
+  result, and spreads its picks over servers. The patch also keeps the results of the
+  pings that are under way when the next round of health checks cancels its round.
+- `liveness-reset.patch`: `liveness.Reset` forgets what the liveness tracking found.
+  `Start` calls it before it creates the new instance, so that nothing carries over
+  from the last instance.
 - `refresh-connections.patch`: adds `splithttp.ForgetConnections` and
   `burst.Observer.CheckSubjects`, which `refreshConnections()` uses.
 

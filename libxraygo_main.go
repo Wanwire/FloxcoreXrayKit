@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	xraycoreapplog "github.com/xtls/xray-core/app/log"
+	xraycoreliveness "github.com/xtls/xray-core/app/observatory/liveness"
 	xraycoreappstats "github.com/xtls/xray-core/app/stats"
 	xraycorecommonlog "github.com/xtls/xray-core/common/log"
 	xraycorefilesystem "github.com/xtls/xray-core/common/platform/filesystem"
@@ -145,6 +146,10 @@ func (controller *XrayCoreController) Start(configContent string) {
 
 func (controller *XrayCoreController) doStart(configContent string) error {
 	log.Println("Starting xray-core...")
+
+	// The liveness tracking of the balancers is global: the new instance
+	// must not inherit what it found in the last one
+	xraycoreliveness.Reset()
 
 	config, err := xraycoreserial.LoadJSONConfig(strings.NewReader(configContent))
 	if err != nil {

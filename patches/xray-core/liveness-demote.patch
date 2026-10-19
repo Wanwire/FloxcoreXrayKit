@@ -1,0 +1,1585 @@
+diff --git a/app/observatory/burst/healthping.go b/app/observatory/burst/healthping.go
+index b5cc021fb..e166788cd 100644
+--- a/app/observatory/burst/healthping.go
++++ b/app/observatory/burst/healthping.go
+@@ -8,6 +8,7 @@ import (
+ 	"sync/atomic"
+ 	"time"
+ 
++	"github.com/xtls/xray-core/app/observatory/liveness"
+ 	"github.com/xtls/xray-core/common/dice"
+ 	"github.com/xtls/xray-core/common/errors"
+ 	"github.com/xtls/xray-core/features/routing"
+@@ -34,6 +35,10 @@ type HealthPing struct {
+ 
+ 	Settings *HealthPingSettings
+ 	Results  map[string]*HealthPingRTTS
++
++	// Wanwire: when the ping behind each tag's latest result started, so
++	// that a late result of a cancelled round cannot replace a newer one
++	lastStarted map[string]time.Time
+ }
+ 
+ // NewHealthPing creates a new HealthPing with settings
+@@ -157,6 +162,7 @@ func (h *HealthPing) Check(tags []string) error {
+ type rtt struct {
+ 	handler string
+ 	value   time.Duration
++	started time.Time // Wanwire: when the ping started, for liveness
+ }
+ 
+ // doCheck performs the 'rounds' amount checks in given 'duration'. You should make
+@@ -185,11 +191,13 @@ func (h *HealthPing) doCheck(ctx context.Context, tags []string, duration time.D
+ 			}
+ 			timers = append(timers, time.AfterFunc(delay, func() {
+ 				errors.LogDebug(h.ctx, "checking ", handler)
++				started := time.Now()
+ 				delay, err := client.MeasureDelay(h.Settings.HttpMethod)
+ 				if err == nil {
+ 					ch <- &rtt{
+ 						handler: handler,
+ 						value:   delay,
++						started: started,
+ 					}
+ 					return
+ 				}
+@@ -198,6 +206,7 @@ func (h *HealthPing) doCheck(ctx context.Context, tags []string, duration time.D
+ 					ch <- &rtt{
+ 						handler: handler,
+ 						value:   0,
++						started: started,
+ 					}
+ 					return
+ 				}
+@@ -210,30 +219,106 @@ func (h *HealthPing) doCheck(ctx context.Context, tags []string, duration time.D
+ 				ch <- &rtt{
+ 					handler: handler,
+ 					value:   rttFailed,
++					started: started,
+ 				}
+ 			}))
+ 		}
+ 	}
+-	for i := 0; i < count; i++ {
++	for received := 0; received < count; received++ {
+ 		select {
+ 		case rtt := <-ch:
+-			if rtt.value > 0 {
+-				// should not put results when network is down
+-				h.PutResult(rtt.handler, rtt.value)
+-			}
++			h.putPing(rtt, false)
+ 		case <-ctx.Done():
++			// Wanwire: the pings that have not started yet are stopped, as
++			// before, but the ones under way still count. A failing ping
++			// runs to the timeout, so one that started in the last seconds
++			// of a round ended after the next round cancelled this one, its
++			// failure went nowhere, and the balancer kept a dead outbound
++			// until its next ping, up to another interval (seen 2026-10-16).
++			stopped := 0
+ 			for _, timer := range timers {
+-				timer.Stop()
++				if timer.Stop() {
++					stopped++
++				}
+ 			}
++			h.collectLate(ch, count-received-stopped)
++			return
++		}
++	}
++}
++
++// collectLate (Wanwire) stores the results of the n pings of a cancelled
++// round that were under way, as they come in. A ping takes at most its
++// timeout, and the connectivity check after a failed one another, so the
++// wait has a bound; the observatory's own end ends it at once.
++func (h *HealthPing) collectLate(ch <-chan *rtt, n int) {
++	if n <= 0 {
++		return
++	}
++	deadline := time.NewTimer(2*h.Settings.Timeout + time.Second)
++	defer deadline.Stop()
++	for ; n > 0; n-- {
++		select {
++		case rtt := <-ch:
++			h.putPing(rtt, true)
++		case <-deadline.C:
++			return
++		case <-h.ctx.Done():
+ 			return
+ 		}
+ 	}
+ }
+ 
++// putPing stores the result of one ping and passes it on to liveness
++// (Wanwire). A late result of a cancelled round is dropped when a ping of the
++// same outbound that started later has stored one already: with sampling 1
++// the latest result is the outbound's state. Within a round every result
++// counts, as upstream, whatever order the samples end in.
++func (h *HealthPing) putPing(rtt *rtt, late bool) {
++	if rtt.value <= 0 {
++		// should not put results when network is down
++		return
++	}
++	if !h.putResult(rtt.handler, rtt.value, rtt.started, late) {
++		errors.LogDebug(h.ctx, "dropping the late result of ", rtt.handler, " from a cancelled round: a newer one is stored")
++		return
++	}
++	if late {
++		errors.LogDebug(h.ctx, "keeping the late result of ", rtt.handler, " from a cancelled round (failed: ", rtt.value == rttFailed, ")")
++	}
++	// Wanwire: a fresh result ends a liveness demotion
++	liveness.ProbeResult(rtt.handler, rtt.started, rtt.value != rttFailed)
++}
++
+ // PutResult put a ping rtt to results
+ func (h *HealthPing) PutResult(tag string, rtt time.Duration) {
+ 	h.access.Lock()
+ 	defer h.access.Unlock()
++	h.putResultLocked(tag, rtt)
++}
++
++// putResult (Wanwire) puts a ping rtt to results and notes when its ping
++// started. A late one is left out, and putResult reports false, when a ping
++// of tag that started after it has put a result already.
++func (h *HealthPing) putResult(tag string, rtt time.Duration, started time.Time, late bool) bool {
++	h.access.Lock()
++	defer h.access.Unlock()
++	last, ok := h.lastStarted[tag]
++	if late && ok && started.Before(last) {
++		return false
++	}
++	if !ok || started.After(last) {
++		if h.lastStarted == nil {
++			h.lastStarted = make(map[string]time.Time)
++		}
++		h.lastStarted[tag] = started
++	}
++	h.putResultLocked(tag, rtt)
++	return true
++}
++
++// putResultLocked is PutResult for a caller that holds h.access.
++func (h *HealthPing) putResultLocked(tag string, rtt time.Duration) {
+ 	if h.Results == nil {
+ 		h.Results = make(map[string]*HealthPingRTTS)
+ 	}
+@@ -265,6 +350,7 @@ func (h *HealthPing) Cleanup(tags []string) {
+ 		}
+ 		if !found {
+ 			delete(h.Results, tag)
++			delete(h.lastStarted, tag)
+ 		}
+ 	}
+ }
+diff --git a/app/observatory/burst/healthping_cancel_test.go b/app/observatory/burst/healthping_cancel_test.go
+new file mode 100644
+index 000000000..86da525a8
+--- /dev/null
++++ b/app/observatory/burst/healthping_cancel_test.go
+@@ -0,0 +1,125 @@
++package burst
++
++import (
++	"context"
++	"net"
++	"sync"
++	"testing"
++	"time"
++
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/features/routing"
++	"github.com/xtls/xray-core/transport/internet/tagged"
++)
++
++// blackhole makes every ping connect and then get no answer, as through an
++// outbound whose server is blocked.
++func blackhole(t *testing.T) {
++	var mu sync.Mutex
++	var far []net.Conn
++	old := tagged.Dialer
++	tagged.Dialer = func(context.Context, routing.Dispatcher, xnet.Destination, string) (xnet.Conn, error) {
++		near, other := net.Pipe()
++		mu.Lock()
++		far = append(far, other)
++		mu.Unlock()
++		return near, nil
++	}
++	t.Cleanup(func() {
++		tagged.Dialer = old
++		mu.Lock()
++		defer mu.Unlock()
++		for _, c := range far {
++			c.Close()
++		}
++	})
++}
++
++func failures(h *HealthPing, tag string) (all, fail int, ok bool) {
++	h.access.Lock()
++	defer h.access.Unlock()
++	r, ok := h.Results[tag]
++	if !ok {
++		return 0, 0, false
++	}
++	stats := r.Get()
++	return stats.All, stats.Fail, true
++}
++
++// Wanwire: a ping that is under way when the next round cancels its round
++// still counts. Before, its failure went nowhere.
++func TestCancelledRoundKeepsPingsUnderWay(t *testing.T) {
++	blackhole(t)
++	h := NewHealthPing(context.Background(), nil, &HealthPingConfig{
++		Destination:   "http://192.0.2.1:88",
++		Timeout:       int64(200 * time.Millisecond),
++		SamplingCount: 1,
++	})
++	ctx, cancel := context.WithCancel(h.ctx)
++	done := make(chan struct{})
++	go func() {
++		h.doCheck(ctx, []string{"dead"}, 0, 1)
++		close(done)
++	}()
++	time.Sleep(50 * time.Millisecond) // the ping is under way
++	cancel()
++	select {
++	case <-done:
++	case <-time.After(3 * time.Second):
++		t.Fatal("doCheck did not return after the cancel")
++	}
++	if _, fail, ok := failures(h, "dead"); !ok || fail != 1 {
++		t.Fatalf("got ok=%v fail=%d, want the failure of the ping under way stored", ok, fail)
++	}
++}
++
++// Wanwire: a ping that has not started when its round is cancelled does not
++// run, as before.
++func TestCancelledRoundStopsPingsNotStarted(t *testing.T) {
++	blackhole(t)
++	h := NewHealthPing(context.Background(), nil, &HealthPingConfig{
++		Destination:   "http://192.0.2.1:88",
++		Timeout:       int64(200 * time.Millisecond),
++		SamplingCount: 1,
++	})
++	ctx, cancel := context.WithCancel(h.ctx)
++	done := make(chan struct{})
++	go func() {
++		// the one ping is due within the hour, so it has not started
++		h.doCheck(ctx, []string{"later"}, time.Hour, 1)
++		close(done)
++	}()
++	time.Sleep(50 * time.Millisecond)
++	cancel()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("doCheck waited for a ping that never started")
++	}
++	if _, _, ok := failures(h, "later"); ok {
++		t.Fatal("a ping that never started stored a result")
++	}
++}
++
++// Wanwire: a late result of a cancelled round does not replace a result of
++// a ping that started after it; within a round every sample counts.
++func TestLateResultDoesNotReplaceNewer(t *testing.T) {
++	h := NewHealthPing(context.Background(), nil, &HealthPingConfig{SamplingCount: 1})
++	t0 := time.Now()
++	h.putPing(&rtt{handler: "x", value: 50 * time.Millisecond, started: t0.Add(time.Second)}, false)
++	h.putPing(&rtt{handler: "x", value: rttFailed, started: t0}, true)
++	if _, fail, _ := failures(h, "x"); fail != 0 {
++		t.Fatal("a late failure replaced a newer success")
++	}
++	h.putPing(&rtt{handler: "y", value: rttFailed, started: t0}, true)
++	if _, fail, _ := failures(h, "y"); fail != 1 {
++		t.Fatal("a late failure with nothing newer was dropped")
++	}
++
++	h2 := NewHealthPing(context.Background(), nil, &HealthPingConfig{SamplingCount: 2})
++	h2.putPing(&rtt{handler: "z", value: 50 * time.Millisecond, started: t0.Add(time.Second)}, false)
++	h2.putPing(&rtt{handler: "z", value: rttFailed, started: t0}, false)
++	if all, fail, _ := failures(h2, "z"); all != 2 || fail != 1 {
++		t.Fatalf("got all=%d fail=%d, want both samples of the round", all, fail)
++	}
++}
+diff --git a/app/observatory/liveness/liveness.go b/app/observatory/liveness/liveness.go
+new file mode 100644
+index 000000000..89fcc31eb
+--- /dev/null
++++ b/app/observatory/liveness/liveness.go
+@@ -0,0 +1,332 @@
++// Package liveness tracks whether the user connections through an outbound
++// get replies, so that a leastLoad balancer can stop preferring an outbound
++// that has stopped answering before its next health check finds out
++// (Wanwire patch).
++//
++// A connection has succeeded once at least MinReplyBytes came back through
++// it. It has failed when that did not happen within ReplyTimeout, or when it
++// ended before. When the last Failures outcomes of an outbound within Window
++// are all failures and none of its connections got a reply within the last
++// ReplyTimeout, the outbound is demoted: the balancer passes it over. Nothing
++// is marked dead. The demotion ends with the outbound's next health check
++// result.
++//
++// A reply before the failures holds the demotion back for ReplyTimeout
++// only: in an outage the replies stop when it begins, while a working
++// outbound keeps answering most connections although some get nothing back
++// (an address its server cannot reach, connections the browser drops in a
++// burst of a page load).
++//
++// The outbound alone is demoted, not the server it dials: where UDP is
++// throttled, the h3 outbound of a server fails while its REALITY and h2
++// outbounds work. The balancer uses the server (from the outbound's dials)
++// to spread its picks over servers and to try the other outbounds of a
++// server with a demoted outbound last.
++package liveness
++
++import (
++	"context"
++	"sort"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/xtls/xray-core/common"
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/errors"
++)
++
++// Rule says when an outbound is demoted.
++type Rule struct {
++	Failures      int
++	Window        time.Duration
++	ReplyTimeout  time.Duration
++	MinReplyBytes int64
++}
++
++// maxEvents bounds the outcomes kept per outbound within the window.
++const maxEvents = 4096
++
++type event struct {
++	at time.Time
++	ok bool
++}
++
++var (
++	enabled  atomic.Bool
++	mu       sync.Mutex
++	rule     Rule
++	events   = map[string][]event{}   // per outbound tag
++	servers  = map[string]string{}    // outbound tag -> the server it dials
++	demoted  = map[string]time.Time{} // outbound tag -> when it was demoted
++	heldBack = map[string]time.Time{} // outbound tag -> the reply last logged as holding it back
++	now      = time.Now
++)
++
++// Configure turns tracking on with r; a rule without failures leaves it as
++// it is. With several balancers the last one configured wins.
++func Configure(r Rule) {
++	if r.Failures <= 0 {
++		return
++	}
++	if r.Window <= 0 {
++		r.Window = 20 * time.Second
++	}
++	if r.ReplyTimeout <= 0 {
++		r.ReplyTimeout = 5 * time.Second
++	}
++	if r.MinReplyBytes <= 0 {
++		r.MinReplyBytes = 1
++	}
++	mu.Lock()
++	rule = r
++	mu.Unlock()
++	enabled.Store(true)
++	errors.LogInfo(context.Background(), "liveness: an outbound is demoted after ", r.Failures,
++		" connections in a row without a reply within ", r.Window, " (reply timeout ",
++		r.ReplyTimeout, ", at least ", r.MinReplyBytes, " bytes)")
++}
++
++// Enabled reports whether a balancer turned tracking on.
++func Enabled() bool {
++	return enabled.Load()
++}
++
++func currentRule() Rule {
++	mu.Lock()
++	defer mu.Unlock()
++	return rule
++}
++
++// SetServer records the server an outbound dials (its first dial counts).
++func SetServer(tag, server string) {
++	if !enabled.Load() || tag == "" || server == "" {
++		return
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	if _, ok := servers[tag]; !ok {
++		servers[tag] = server
++	}
++}
++
++// server is the server an outbound dials, or a key of the outbound's own
++// while it has not dialed yet. The caller holds mu.
++func server(tag string) string {
++	if s, ok := servers[tag]; ok {
++		return s
++	}
++	return "outbound " + tag
++}
++
++// Server returns the server an outbound dials, or a key of its own while it
++// has not dialed yet, so that a balancer can spread over servers.
++func Server(tag string) string {
++	mu.Lock()
++	defer mu.Unlock()
++	return server(tag)
++}
++
++// SiblingDemoted reports whether another outbound of tag's server is
++// demoted: the balancer then tries tag after the outbounds of other servers.
++func SiblingDemoted(tag string) bool {
++	if !enabled.Load() {
++		return false
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	s, ok := servers[tag]
++	if !ok {
++		return false
++	}
++	for other := range demoted {
++		if other != tag && servers[other] == s {
++			return true
++		}
++	}
++	return false
++}
++
++// siblings lists the other outbounds of tag's server. The caller holds mu.
++func siblings(tag string) []string {
++	var tags []string
++	if s, ok := servers[tag]; ok {
++		for other, os := range servers {
++			if other != tag && os == s {
++				tags = append(tags, other)
++			}
++		}
++	}
++	sort.Strings(tags)
++	return tags
++}
++
++// note records the outcome of one connection through tag; it reports false
++// when the outcome does not count because tag is demoted.
++func note(tag string, ok bool) bool {
++	t := now()
++	mu.Lock()
++	defer mu.Unlock()
++	if _, out := demoted[tag]; out {
++		return false // nothing changes until its next health check
++	}
++	ev := append(events[tag], event{at: t, ok: ok})
++	if len(ev) > maxEvents {
++		ev = append(ev[:0], ev[len(ev)-maxEvents:]...)
++	}
++	events[tag] = trim(ev, t)
++	return true
++}
++
++// trim drops the outcomes older than the window. The caller holds mu.
++func trim(ev []event, t time.Time) []event {
++	cut := 0
++	for cut < len(ev) && t.Sub(ev[cut].at) > rule.Window {
++		cut++
++	}
++	if cut > 0 {
++		ev = append(ev[:0], ev[cut:]...)
++	}
++	return ev
++}
++
++// Demoted reports whether the balancer should pass over tag. The first call
++// that finds the rule met for tag demotes it.
++func Demoted(tag string) bool {
++	if !enabled.Load() {
++		return false
++	}
++	t := now()
++	mu.Lock()
++	defer mu.Unlock()
++	if _, out := demoted[tag]; out {
++		return true
++	}
++	ev := trim(events[tag], t)
++	events[tag] = ev
++	last := len(ev) - 1 // ends at the last reply within the window, if any
++	for last >= 0 && !ev[last].ok {
++		last--
++	}
++	failures := len(ev) - 1 - last
++	if failures < rule.Failures {
++		return false
++	}
++	if last >= 0 && t.Sub(ev[last].at) < rule.ReplyTimeout {
++		if !heldBack[tag].Equal(ev[last].at) {
++			heldBack[tag] = ev[last].at
++			errors.LogDebug(context.Background(), "liveness: ", failures,
++				" connections in a row through ", tag, " got no reply, but another got one ",
++				t.Sub(ev[last].at).Round(time.Millisecond), " ago; not passing it over yet")
++		}
++		return false
++	}
++	delete(heldBack, tag)
++	demoted[tag] = t
++	others := ""
++	if sib := siblings(tag); len(sib) > 0 {
++		others = "; the other outbounds of " + server(tag) + " (" + strings.Join(sib, ", ") +
++			") go after those of other servers"
++	}
++	errors.LogWarning(context.Background(), "liveness: ", failures,
++		" connections in a row through ", tag, " got no reply; passing it over until its next "+
++			"health check", others)
++	return true
++}
++
++// ProbeResult ends the demotion of tag when a health check of tag that
++// started after the demotion has a result. A failed one leaves the outbound
++// to the health checks, which then count it out; the outcomes collected
++// before are dropped either way.
++func ProbeResult(tag string, started time.Time, ok bool) {
++	if !enabled.Load() {
++		return
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	at, out := demoted[tag]
++	if !out || started.Before(at) {
++		return
++	}
++	result := "answered"
++	if !ok {
++		result = "failed"
++	}
++	errors.LogWarning(context.Background(), "liveness: ", tag, " has a new health check result (",
++		result, ") ", now().Sub(at).Round(time.Second), " after its demotion; the demotion ends")
++	delete(demoted, tag)
++	delete(events, tag)
++}
++
++// Writer watches the replies of one connection through an outbound: the
++// outbound writes them into it.
++type Writer struct {
++	buf.Writer
++	ctx      context.Context
++	tag      string
++	dest     string
++	min      int64
++	started  time.Time
++	got      atomic.Int64
++	finished atomic.Bool
++}
++
++// Watch wraps w, the writer an outbound puts the replies of one connection
++// to dest into, while tracking is on. ctx is the connection's, for the debug
++// log of the outcome.
++func Watch(ctx context.Context, tag, dest string, w buf.Writer) buf.Writer {
++	if !enabled.Load() || tag == "" {
++		return w
++	}
++	r := currentRule()
++	lw := &Writer{Writer: w, ctx: ctx, tag: tag, dest: dest, min: r.MinReplyBytes, started: now()}
++	time.AfterFunc(r.ReplyTimeout, func() { lw.finish(false, true) })
++	return lw
++}
++
++// Done tells the watch on w, if any, that the outbound is through with the
++// connection: one that ends before its reply has failed.
++func Done(w buf.Writer) {
++	if lw, ok := w.(*Writer); ok {
++		lw.finish(false, false)
++	}
++}
++
++// finish records the outcome once, and logs it at debug level so that a
++// rule can be replayed from a log.
++func (w *Writer) finish(ok, timedOut bool) {
++	if !w.finished.CompareAndSwap(false, true) {
++		return
++	}
++	counted := note(w.tag, ok)
++	elapsed := now().Sub(w.started).Round(time.Millisecond)
++	what := " ended after " + elapsed.String() + " without a reply"
++	if ok {
++		what = " replied after " + elapsed.String()
++	} else if timedOut {
++		what = " got no reply in " + elapsed.String()
++	}
++	if !counted {
++		what += "; not counted while demoted"
++	}
++	errors.LogDebug(w.ctx, "liveness: ", w.tag, " ", w.dest, what)
++}
++
++// WriteMultiBuffer implements buf.Writer.
++func (w *Writer) WriteMultiBuffer(mb buf.MultiBuffer) error {
++	if !w.finished.Load() && w.got.Add(int64(mb.Len())) >= w.min {
++		w.finish(true, false)
++	}
++	return w.Writer.WriteMultiBuffer(mb)
++}
++
++// Close implements common.Closable.
++func (w *Writer) Close() error {
++	return common.Close(w.Writer)
++}
++
++// Interrupt implements common.Interruptible.
++func (w *Writer) Interrupt() {
++	common.Interrupt(w.Writer)
++}
+diff --git a/app/observatory/liveness/liveness_test.go b/app/observatory/liveness/liveness_test.go
+new file mode 100644
+index 000000000..e7d6bbb44
+--- /dev/null
++++ b/app/observatory/liveness/liveness_test.go
+@@ -0,0 +1,223 @@
++package liveness
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common"
++	"github.com/xtls/xray-core/common/buf"
++)
++
++// start resets the package and turns tracking on with r on a fake clock;
++// the returned pointer moves the clock.
++func start(t *testing.T, r Rule) *time.Time {
++	t.Helper()
++	mu.Lock()
++	events = map[string][]event{}
++	servers = map[string]string{}
++	demoted = map[string]time.Time{}
++	heldBack = map[string]time.Time{}
++	rule = Rule{}
++	mu.Unlock()
++	enabled.Store(false)
++	clock := time.Unix(1_000_000, 0)
++	now = func() time.Time { return clock }
++	t.Cleanup(func() {
++		now = time.Now
++		enabled.Store(false)
++	})
++	Configure(r)
++	return &clock
++}
++
++func outcomes(tag string) (ok, failed int) {
++	mu.Lock()
++	defer mu.Unlock()
++	for _, e := range events[tag] {
++		if e.ok {
++			ok++
++		} else {
++			failed++
++		}
++	}
++	return
++}
++
++func bytes(n int) buf.MultiBuffer {
++	b := buf.New()
++	common.Must2(b.Write(make([]byte, n)))
++	return buf.MultiBuffer{b}
++}
++
++func fail(tag string, n int) {
++	for i := 0; i < n; i++ {
++		note(tag, false)
++	}
++}
++
++func TestDemotedAfterFailuresInARow(t *testing.T) {
++	start(t, Rule{Failures: 3, Window: 20 * time.Second})
++	fail("a", 2)
++	if Demoted("a") {
++		t.Fatal("demoted after 2 of 3 failures")
++	}
++	fail("a", 1)
++	if !Demoted("a") {
++		t.Fatal("not demoted after 3 failures in a row")
++	}
++	if Demoted("b") {
++		t.Fatal("an outbound without outcomes is demoted")
++	}
++}
++
++func TestEarlierSuccessDoesNotHoldBack(t *testing.T) {
++	clock := start(t, Rule{Failures: 3, Window: 20 * time.Second, ReplyTimeout: 5 * time.Second})
++	note("a", true) // the reply that came just before the outage
++	*clock = clock.Add(6 * time.Second)
++	fail("a", 3)
++	if !Demoted("a") {
++		t.Fatal("a success older than the reply timeout held the demotion back")
++	}
++}
++
++func TestRecentReplyHoldsBack(t *testing.T) {
++	clock := start(t, Rule{Failures: 3, Window: 20 * time.Second, ReplyTimeout: 5 * time.Second})
++	note("a", true)
++	*clock = clock.Add(time.Second)
++	fail("a", 3)
++	if Demoted("a") {
++		t.Fatal("demoted although a connection got a reply 1 s before")
++	}
++	*clock = clock.Add(3 * time.Second)
++	if Demoted("a") {
++		t.Fatal("demoted within the reply timeout of the last reply")
++	}
++	*clock = clock.Add(2 * time.Second) // nothing answered for 6 s
++	if !Demoted("a") {
++		t.Fatal("not demoted once the reply timeout passed without a reply")
++	}
++}
++
++func TestSuccessBreaksTheRow(t *testing.T) {
++	start(t, Rule{Failures: 3, Window: 20 * time.Second})
++	fail("a", 2)
++	note("a", true)
++	fail("a", 2)
++	if Demoted("a") {
++		t.Fatal("demoted although a reply came between the failures")
++	}
++}
++
++func TestOldFailuresDoNotCount(t *testing.T) {
++	clock := start(t, Rule{Failures: 3, Window: 20 * time.Second})
++	fail("a", 2)
++	*clock = clock.Add(21 * time.Second)
++	fail("a", 1)
++	if Demoted("a") {
++		t.Fatal("failures older than the window counted")
++	}
++	fail("a", 2)
++	if !Demoted("a") {
++		t.Fatal("3 failures within the window did not demote")
++	}
++}
++
++func TestOnlyTheOutboundIsDemoted(t *testing.T) {
++	start(t, Rule{Failures: 3, Window: 20 * time.Second})
++	SetServer("s-h2", "192.0.2.1:443")
++	SetServer("s-h3", "192.0.2.1:443")
++	SetServer("r", "192.0.2.2:443")
++	SetServer("s-h3", "192.0.2.9:443") // the first dial counts
++	if Server("s-h3") != "192.0.2.1:443" || Server("x") == Server("y") {
++		t.Fatal("wrong server keys")
++	}
++	fail("s-h3", 3)
++	if !Demoted("s-h3") {
++		t.Fatal("not demoted")
++	}
++	if Demoted("s-h2") {
++		t.Fatal("the other transport of the same server was demoted with it")
++	}
++	if !SiblingDemoted("s-h2") {
++		t.Fatal("the other transport of the server is not marked to go last")
++	}
++	if SiblingDemoted("s-h3") || SiblingDemoted("r") || SiblingDemoted("x") {
++		t.Fatal("an outbound without a demoted sibling is marked to go last")
++	}
++}
++
++func TestDemotionLastsUntilItsNextProbe(t *testing.T) {
++	clock := start(t, Rule{Failures: 2, Window: 20 * time.Second})
++	SetServer("s-h2", "192.0.2.1:443")
++	SetServer("s-h3", "192.0.2.1:443")
++	before := *clock
++	*clock = clock.Add(time.Second)
++	fail("s-h3", 2)
++	if !Demoted("s-h3") {
++		t.Fatal("not demoted")
++	}
++	*clock = clock.Add(time.Minute) // the failures are out of the window
++	note("s-h3", true)              // ignored while demoted
++	if !Demoted("s-h3") {
++		t.Fatal("the demotion ended without a health check")
++	}
++	ProbeResult("s-h2", *clock, true)
++	if !Demoted("s-h3") {
++		t.Fatal("a health check of another outbound ended the demotion")
++	}
++	ProbeResult("s-h3", before, true)
++	if !Demoted("s-h3") {
++		t.Fatal("a health check started before the demotion ended it")
++	}
++	ProbeResult("s-h3", *clock, false)
++	if Demoted("s-h3") || SiblingDemoted("s-h2") {
++		t.Fatal("the outbound's next health check result did not end the demotion")
++	}
++	fail("s-h3", 1)
++	if Demoted("s-h3") {
++		t.Fatal("outcomes from before the demotion still count")
++	}
++}
++
++func TestWriterOutcomes(t *testing.T) {
++	start(t, Rule{Failures: 1, ReplyTimeout: 50 * time.Millisecond, MinReplyBytes: 10})
++	var sink buf.Writer = buf.Discard
++	ctx := context.Background()
++
++	replied := Watch(ctx, "replied", "tcp:example.com:443", sink)
++	common.Must(replied.WriteMultiBuffer(bytes(4)))
++	common.Must(replied.WriteMultiBuffer(bytes(6)))
++	Done(replied)
++
++	short := Watch(ctx, "short", "tcp:example.com:443", sink)
++	common.Must(short.WriteMultiBuffer(bytes(4)))
++	Done(short)
++
++	silent := Watch(ctx, "silent", "udp:1.1.1.1:53", sink)
++	time.Sleep(200 * time.Millisecond)
++	Done(silent) // after the timeout: the outcome is already in
++
++	for _, c := range []struct {
++		tag        string
++		ok, failed int
++	}{{"replied", 1, 0}, {"short", 0, 1}, {"silent", 0, 1}} {
++		if ok, failed := outcomes(c.tag); ok != c.ok || failed != c.failed {
++			t.Errorf("%s: %d replied, %d failed; want %d, %d", c.tag, ok, failed, c.ok, c.failed)
++		}
++	}
++}
++
++func TestOffByDefault(t *testing.T) {
++	start(t, Rule{}) // no failures: stays off
++	if Enabled() {
++		t.Fatal("a rule without failures turned tracking on")
++	}
++	if w := Watch(context.Background(), "a", "", buf.Discard); w != buf.Discard {
++		t.Fatal("Watch wrapped a writer while tracking is off")
++	}
++	fail("a", 5)
++	if Demoted("a") {
++		t.Fatal("demoted while tracking is off")
++	}
++}
+diff --git a/app/proxyman/outbound/handler.go b/app/proxyman/outbound/handler.go
+index 5f4833e9b..1cb943bf5 100644
+--- a/app/proxyman/outbound/handler.go
++++ b/app/proxyman/outbound/handler.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"github.com/xtls/xray-core/common/dice"
+ 
++	"github.com/xtls/xray-core/app/observatory/liveness"
+ 	"github.com/xtls/xray-core/app/proxyman"
+ 	"github.com/xtls/xray-core/common"
+ 	"github.com/xtls/xray-core/common/buf"
+@@ -181,6 +182,15 @@ func (h *Handler) Tag() string {
+ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
+ 	outbounds := session.OutboundsFromContext(ctx)
+ 	ob := outbounds[len(outbounds)-1]
++	var watch buf.Writer
++	if liveness.Enabled() {
++		// Wanwire: watch whether this connection gets a reply (on a copy:
++		// the caller's link stays as it was)
++		watched := *link
++		watch = liveness.Watch(ctx, h.tag, ob.Target.String(), watched.Writer)
++		watched.Writer = watch
++		link = &watched
++	}
+ 	content := session.ContentFromContext(ctx)
+ 	if h.senderSettings != nil && h.senderSettings.TargetStrategy.HasStrategy() && ob.Target.Address.Family().IsDomain() && (content == nil || !content.SkipDNSResolve) {
+ 		strategy := h.senderSettings.TargetStrategy
+@@ -241,6 +251,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
+ 	}
+ out:
+ 	err := h.proxy.Process(ctx, link, h)
++	liveness.Done(watch)
+ 	var errC error
+ 	if err != nil {
+ 		errC = errors.Cause(err)
+@@ -270,6 +281,9 @@ func (h *Handler) DestIpAddress() net.IP {
+ 
+ // Dial implements internet.Dialer.
+ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connection, error) {
++	// Wanwire: the server this outbound dials groups it with the other
++	// transports to the same server
++	liveness.SetServer(h.tag, dest.NetAddr())
+ 	if h.senderSettings != nil {
+ 
+ 		if h.senderSettings.ProxySettings.HasTag() {
+diff --git a/app/router/config.pb.go b/app/router/config.pb.go
+index 6c1e27504..782d3a813 100644
+--- a/app/router/config.pb.go
++++ b/app/router/config.pb.go
+@@ -73,7 +73,7 @@ func (x Config_DomainStrategy) Number() protoreflect.EnumNumber {
+ 
+ // Deprecated: Use Config_DomainStrategy.Descriptor instead.
+ func (Config_DomainStrategy) EnumDescriptor() ([]byte, []int) {
+-	return file_app_router_config_proto_rawDescGZIP(), []int{5, 0}
++	return file_app_router_config_proto_rawDescGZIP(), []int{6, 0}
+ }
+ 
+ type RoutingRule struct {
+@@ -503,7 +503,11 @@ type StrategyLeastLoadConfig struct {
+ 	// max acceptable rtt, filter away high delay nodes. default 0
+ 	MaxRTT int64 `protobuf:"varint,5,opt,name=maxRTT,proto3" json:"maxRTT,omitempty"`
+ 	// acceptable failure rate
+-	Tolerance     float32 `protobuf:"fixed32,6,opt,name=tolerance,proto3" json:"tolerance,omitempty"`
++	Tolerance float32 `protobuf:"fixed32,6,opt,name=tolerance,proto3" json:"tolerance,omitempty"`
++	// Wanwire: prefer other outbounds over one whose connections get no
++	// replies, until its next health check result. A high field number keeps
++	// clear of the fields upstream adds.
++	Demote        *StrategyLeastLoadDemote `protobuf:"bytes,100,opt,name=demote,proto3" json:"demote,omitempty"`
+ 	unknownFields protoimpl.UnknownFields
+ 	sizeCache     protoimpl.SizeCache
+ }
+@@ -573,6 +577,90 @@ func (x *StrategyLeastLoadConfig) GetTolerance() float32 {
+ 	return 0
+ }
+ 
++func (x *StrategyLeastLoadConfig) GetDemote() *StrategyLeastLoadDemote {
++	if x != nil {
++		return x.Demote
++	}
++	return nil
++}
++
++// Wanwire: when the balancer stops preferring an outbound whose user
++// connections get no replies. The outbound is not marked dead; the others
++// are preferred until its next health check result comes in.
++type StrategyLeastLoadDemote struct {
++	state protoimpl.MessageState `protogen:"open.v1"`
++	// this many connections without a reply in the window, and none with one,
++	// demote the outbound; 0 turns demotion off
++	Failures int32 `protobuf:"varint,1,opt,name=failures,proto3" json:"failures,omitempty"`
++	// the window, int64 values of time.Duration (default 20s)
++	Window int64 `protobuf:"varint,2,opt,name=window,proto3" json:"window,omitempty"`
++	// a connection that got no reply within this time has failed, int64
++	// values of time.Duration (default 5s)
++	ReplyTimeout int64 `protobuf:"varint,3,opt,name=reply_timeout,json=replyTimeout,proto3" json:"reply_timeout,omitempty"`
++	// the reply bytes a connection must get to count as replied (default 1)
++	MinReplyBytes int64 `protobuf:"varint,4,opt,name=min_reply_bytes,json=minReplyBytes,proto3" json:"min_reply_bytes,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *StrategyLeastLoadDemote) Reset() {
++	*x = StrategyLeastLoadDemote{}
++	mi := &file_app_router_config_proto_msgTypes[5]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *StrategyLeastLoadDemote) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*StrategyLeastLoadDemote) ProtoMessage() {}
++
++func (x *StrategyLeastLoadDemote) ProtoReflect() protoreflect.Message {
++	mi := &file_app_router_config_proto_msgTypes[5]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use StrategyLeastLoadDemote.ProtoReflect.Descriptor instead.
++func (*StrategyLeastLoadDemote) Descriptor() ([]byte, []int) {
++	return file_app_router_config_proto_rawDescGZIP(), []int{5}
++}
++
++func (x *StrategyLeastLoadDemote) GetFailures() int32 {
++	if x != nil {
++		return x.Failures
++	}
++	return 0
++}
++
++func (x *StrategyLeastLoadDemote) GetWindow() int64 {
++	if x != nil {
++		return x.Window
++	}
++	return 0
++}
++
++func (x *StrategyLeastLoadDemote) GetReplyTimeout() int64 {
++	if x != nil {
++		return x.ReplyTimeout
++	}
++	return 0
++}
++
++func (x *StrategyLeastLoadDemote) GetMinReplyBytes() int64 {
++	if x != nil {
++		return x.MinReplyBytes
++	}
++	return 0
++}
++
+ type Config struct {
+ 	state          protoimpl.MessageState `protogen:"open.v1"`
+ 	DomainStrategy Config_DomainStrategy  `protobuf:"varint,1,opt,name=domain_strategy,json=domainStrategy,proto3,enum=xray.app.router.Config_DomainStrategy" json:"domain_strategy,omitempty"`
+@@ -584,7 +672,7 @@ type Config struct {
+ 
+ func (x *Config) Reset() {
+ 	*x = Config{}
+-	mi := &file_app_router_config_proto_msgTypes[5]
++	mi := &file_app_router_config_proto_msgTypes[6]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -596,7 +684,7 @@ func (x *Config) String() string {
+ func (*Config) ProtoMessage() {}
+ 
+ func (x *Config) ProtoReflect() protoreflect.Message {
+-	mi := &file_app_router_config_proto_msgTypes[5]
++	mi := &file_app_router_config_proto_msgTypes[6]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -609,7 +697,7 @@ func (x *Config) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use Config.ProtoReflect.Descriptor instead.
+ func (*Config) Descriptor() ([]byte, []int) {
+-	return file_app_router_config_proto_rawDescGZIP(), []int{5}
++	return file_app_router_config_proto_rawDescGZIP(), []int{6}
+ }
+ 
+ func (x *Config) GetDomainStrategy() Config_DomainStrategy {
+@@ -683,13 +771,19 @@ const file_app_router_config_proto_rawDesc = "" +
+ 	"\x0eStrategyWeight\x12\x16\n" +
+ 	"\x06regexp\x18\x01 \x01(\bR\x06regexp\x12\x14\n" +
+ 	"\x05match\x18\x02 \x01(\tR\x05match\x12\x14\n" +
+-	"\x05value\x18\x03 \x01(\x02R\x05value\"\xc0\x01\n" +
++	"\x05value\x18\x03 \x01(\x02R\x05value\"\x82\x02\n" +
+ 	"\x17StrategyLeastLoadConfig\x125\n" +
+ 	"\x05costs\x18\x02 \x03(\v2\x1f.xray.app.router.StrategyWeightR\x05costs\x12\x1c\n" +
+ 	"\tbaselines\x18\x03 \x03(\x03R\tbaselines\x12\x1a\n" +
+ 	"\bexpected\x18\x04 \x01(\x05R\bexpected\x12\x16\n" +
+ 	"\x06maxRTT\x18\x05 \x01(\x03R\x06maxRTT\x12\x1c\n" +
+-	"\ttolerance\x18\x06 \x01(\x02R\ttolerance\"\x96\x02\n" +
++	"\ttolerance\x18\x06 \x01(\x02R\ttolerance\x12@\n" +
++	"\x06demote\x18d \x01(\v2(.xray.app.router.StrategyLeastLoadDemoteR\x06demote\"\x9a\x01\n" +
++	"\x17StrategyLeastLoadDemote\x12\x1a\n" +
++	"\bfailures\x18\x01 \x01(\x05R\bfailures\x12\x16\n" +
++	"\x06window\x18\x02 \x01(\x03R\x06window\x12#\n" +
++	"\rreply_timeout\x18\x03 \x01(\x03R\freplyTimeout\x12&\n" +
++	"\x0fmin_reply_bytes\x18\x04 \x01(\x03R\rminReplyBytes\"\x96\x02\n" +
+ 	"\x06Config\x12O\n" +
+ 	"\x0fdomain_strategy\x18\x01 \x01(\x0e2&.xray.app.router.Config.DomainStrategyR\x0edomainStrategy\x120\n" +
+ 	"\x04rule\x18\x02 \x03(\v2\x1c.xray.app.router.RoutingRuleR\x04rule\x12E\n" +
+@@ -714,7 +808,7 @@ func file_app_router_config_proto_rawDescGZIP() []byte {
+ }
+ 
+ var file_app_router_config_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+-var file_app_router_config_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
++var file_app_router_config_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+ var file_app_router_config_proto_goTypes = []any{
+ 	(Config_DomainStrategy)(0),      // 0: xray.app.router.Config.DomainStrategy
+ 	(*RoutingRule)(nil),             // 1: xray.app.router.RoutingRule
+@@ -722,38 +816,40 @@ var file_app_router_config_proto_goTypes = []any{
+ 	(*BalancingRule)(nil),           // 3: xray.app.router.BalancingRule
+ 	(*StrategyWeight)(nil),          // 4: xray.app.router.StrategyWeight
+ 	(*StrategyLeastLoadConfig)(nil), // 5: xray.app.router.StrategyLeastLoadConfig
+-	(*Config)(nil),                  // 6: xray.app.router.Config
+-	nil,                             // 7: xray.app.router.RoutingRule.AttributesEntry
+-	nil,                             // 8: xray.app.router.WebhookConfig.HeadersEntry
+-	(*geodata.DomainRule)(nil),      // 9: xray.common.geodata.DomainRule
+-	(*geodata.IPRule)(nil),          // 10: xray.common.geodata.IPRule
+-	(*net.PortList)(nil),            // 11: xray.common.net.PortList
+-	(net.Network)(0),                // 12: xray.common.net.Network
+-	(*serial.TypedMessage)(nil),     // 13: xray.common.serial.TypedMessage
++	(*StrategyLeastLoadDemote)(nil), // 6: xray.app.router.StrategyLeastLoadDemote
++	(*Config)(nil),                  // 7: xray.app.router.Config
++	nil,                             // 8: xray.app.router.RoutingRule.AttributesEntry
++	nil,                             // 9: xray.app.router.WebhookConfig.HeadersEntry
++	(*geodata.DomainRule)(nil),      // 10: xray.common.geodata.DomainRule
++	(*geodata.IPRule)(nil),          // 11: xray.common.geodata.IPRule
++	(*net.PortList)(nil),            // 12: xray.common.net.PortList
++	(net.Network)(0),                // 13: xray.common.net.Network
++	(*serial.TypedMessage)(nil),     // 14: xray.common.serial.TypedMessage
+ }
+ var file_app_router_config_proto_depIdxs = []int32{
+-	9,  // 0: xray.app.router.RoutingRule.domain:type_name -> xray.common.geodata.DomainRule
+-	10, // 1: xray.app.router.RoutingRule.ip:type_name -> xray.common.geodata.IPRule
+-	11, // 2: xray.app.router.RoutingRule.port_list:type_name -> xray.common.net.PortList
+-	12, // 3: xray.app.router.RoutingRule.networks:type_name -> xray.common.net.Network
+-	10, // 4: xray.app.router.RoutingRule.source_ip:type_name -> xray.common.geodata.IPRule
+-	11, // 5: xray.app.router.RoutingRule.source_port_list:type_name -> xray.common.net.PortList
+-	7,  // 6: xray.app.router.RoutingRule.attributes:type_name -> xray.app.router.RoutingRule.AttributesEntry
+-	10, // 7: xray.app.router.RoutingRule.local_ip:type_name -> xray.common.geodata.IPRule
+-	11, // 8: xray.app.router.RoutingRule.local_port_list:type_name -> xray.common.net.PortList
+-	11, // 9: xray.app.router.RoutingRule.vless_route_list:type_name -> xray.common.net.PortList
++	10, // 0: xray.app.router.RoutingRule.domain:type_name -> xray.common.geodata.DomainRule
++	11, // 1: xray.app.router.RoutingRule.ip:type_name -> xray.common.geodata.IPRule
++	12, // 2: xray.app.router.RoutingRule.port_list:type_name -> xray.common.net.PortList
++	13, // 3: xray.app.router.RoutingRule.networks:type_name -> xray.common.net.Network
++	11, // 4: xray.app.router.RoutingRule.source_ip:type_name -> xray.common.geodata.IPRule
++	12, // 5: xray.app.router.RoutingRule.source_port_list:type_name -> xray.common.net.PortList
++	8,  // 6: xray.app.router.RoutingRule.attributes:type_name -> xray.app.router.RoutingRule.AttributesEntry
++	11, // 7: xray.app.router.RoutingRule.local_ip:type_name -> xray.common.geodata.IPRule
++	12, // 8: xray.app.router.RoutingRule.local_port_list:type_name -> xray.common.net.PortList
++	12, // 9: xray.app.router.RoutingRule.vless_route_list:type_name -> xray.common.net.PortList
+ 	2,  // 10: xray.app.router.RoutingRule.webhook:type_name -> xray.app.router.WebhookConfig
+-	8,  // 11: xray.app.router.WebhookConfig.headers:type_name -> xray.app.router.WebhookConfig.HeadersEntry
+-	13, // 12: xray.app.router.BalancingRule.strategy_settings:type_name -> xray.common.serial.TypedMessage
++	9,  // 11: xray.app.router.WebhookConfig.headers:type_name -> xray.app.router.WebhookConfig.HeadersEntry
++	14, // 12: xray.app.router.BalancingRule.strategy_settings:type_name -> xray.common.serial.TypedMessage
+ 	4,  // 13: xray.app.router.StrategyLeastLoadConfig.costs:type_name -> xray.app.router.StrategyWeight
+-	0,  // 14: xray.app.router.Config.domain_strategy:type_name -> xray.app.router.Config.DomainStrategy
+-	1,  // 15: xray.app.router.Config.rule:type_name -> xray.app.router.RoutingRule
+-	3,  // 16: xray.app.router.Config.balancing_rule:type_name -> xray.app.router.BalancingRule
+-	17, // [17:17] is the sub-list for method output_type
+-	17, // [17:17] is the sub-list for method input_type
+-	17, // [17:17] is the sub-list for extension type_name
+-	17, // [17:17] is the sub-list for extension extendee
+-	0,  // [0:17] is the sub-list for field type_name
++	6,  // 14: xray.app.router.StrategyLeastLoadConfig.demote:type_name -> xray.app.router.StrategyLeastLoadDemote
++	0,  // 15: xray.app.router.Config.domain_strategy:type_name -> xray.app.router.Config.DomainStrategy
++	1,  // 16: xray.app.router.Config.rule:type_name -> xray.app.router.RoutingRule
++	3,  // 17: xray.app.router.Config.balancing_rule:type_name -> xray.app.router.BalancingRule
++	18, // [18:18] is the sub-list for method output_type
++	18, // [18:18] is the sub-list for method input_type
++	18, // [18:18] is the sub-list for extension type_name
++	18, // [18:18] is the sub-list for extension extendee
++	0,  // [0:18] is the sub-list for field type_name
+ }
+ 
+ func init() { file_app_router_config_proto_init() }
+@@ -771,7 +867,7 @@ func file_app_router_config_proto_init() {
+ 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+ 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_app_router_config_proto_rawDesc), len(file_app_router_config_proto_rawDesc)),
+ 			NumEnums:      1,
+-			NumMessages:   8,
++			NumMessages:   9,
+ 			NumExtensions: 0,
+ 			NumServices:   0,
+ 		},
+diff --git a/app/router/config.proto b/app/router/config.proto
+index 60f565c36..4631ff134 100644
+--- a/app/router/config.proto
++++ b/app/router/config.proto
+@@ -89,6 +89,26 @@ message StrategyLeastLoadConfig {
+   int64 maxRTT = 5;
+   // acceptable failure rate
+   float tolerance = 6;
++  // Wanwire: prefer other outbounds over one whose connections get no
++  // replies, until its next health check result. A high field number keeps
++  // clear of the fields upstream adds.
++  StrategyLeastLoadDemote demote = 100;
++}
++
++// Wanwire: when the balancer stops preferring an outbound whose user
++// connections get no replies. The outbound is not marked dead; the others
++// are preferred until its next health check result comes in.
++message StrategyLeastLoadDemote {
++  // this many connections without a reply in the window, and none with one,
++  // demote the outbound; 0 turns demotion off
++  int32 failures = 1;
++  // the window, int64 values of time.Duration (default 20s)
++  int64 window = 2;
++  // a connection that got no reply within this time has failed, int64
++  // values of time.Duration (default 5s)
++  int64 reply_timeout = 3;
++  // the reply bytes a connection must get to count as replied (default 1)
++  int64 min_reply_bytes = 4;
+ }
+ 
+ message Config {
+diff --git a/app/router/strategy_leastload.go b/app/router/strategy_leastload.go
+index 289982a84..8aecc8ead 100644
+--- a/app/router/strategy_leastload.go
++++ b/app/router/strategy_leastload.go
+@@ -8,6 +8,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/xtls/xray-core/app/observatory"
++	"github.com/xtls/xray-core/app/observatory/liveness"
+ 	"github.com/xtls/xray-core/common"
+ 	"github.com/xtls/xray-core/common/dice"
+ 	"github.com/xtls/xray-core/common/errors"
+@@ -36,6 +37,14 @@ func (l *LeastLoadStrategy) GetPrincipleTarget(strings []string) []string {
+ 
+ // NewLeastLoadStrategy creates a new LeastLoadStrategy with settings
+ func NewLeastLoadStrategy(settings *StrategyLeastLoadConfig) *LeastLoadStrategy {
++	if d := settings.GetDemote(); d.GetFailures() > 0 {
++		liveness.Configure(liveness.Rule{
++			Failures:      int(d.GetFailures()),
++			Window:        time.Duration(d.GetWindow()),
++			ReplyTimeout:  time.Duration(d.GetReplyTimeout()),
++			MinReplyBytes: d.GetMinReplyBytes(),
++		})
++	}
+ 	return &LeastLoadStrategy{
+ 		settings: settings,
+ 		costs: NewWeightManager(
+@@ -78,11 +87,85 @@ func (s *LeastLoadStrategy) PickOutbound(candidates []string) string {
+ }
+ 
+ func (s *LeastLoadStrategy) pickOutbounds(candidates []string) []*node {
+-	qualified := s.getNodes(candidates)
++	qualified, dead := s.getNodes(candidates)
++	if s.settings.GetDemote().GetFailures() > 0 {
++		qualified = preferLive(qualified)
++		if len(s.settings.Baselines) == 0 {
++			qualified = spreadServers(qualified, serversOf(dead))
++		}
++	}
+ 	selects := s.selectLeastLoad(qualified)
+ 	return selects
+ }
+ 
++// preferLive leaves out the outbounds whose connections got no replies
++// lately (Wanwire, package liveness), unless that would leave none.
++func preferLive(nodes []*node) []*node {
++	live := make([]*node, 0, len(nodes))
++	for _, n := range nodes {
++		if !liveness.Demoted(n.Tag) {
++			live = append(live, n)
++		}
++	}
++	if len(live) == 0 {
++		return nodes
++	}
++	return live
++}
++
++// spreadServers orders the outbounds for picking (Wanwire): first those of
++// the servers that look healthy, then those of a server with an outbound
++// that is demoted or that the health checks found dead (deadServers), and
++// in each group the best outbound of each server first, then the other
++// transports of those servers. The expected outbounds are then on different
++// servers while there are enough, so that one server's outage takes out one
++// of them, not all, and the place of a demoted or dead outbound goes to
++// another server before it goes to a sibling that may share its fate: when
++// a server's address is blocked, the health check of one transport fails
++// first and the others follow (seen 2026-10-16, where the h3 of a server
++// whose REALITY had just failed its check took the free place for 10 s).
++// The group is an order, not a verdict: where UDP is throttled every
++// server's h3 fails its checks while REALITY and h2 work, and the picks
++// then still go to different servers.
++func spreadServers(nodes []*node, deadServers map[string]bool) []*node {
++	var healthy, doubtful []*node
++	for _, n := range nodes {
++		if liveness.SiblingDemoted(n.Tag) || deadServers[liveness.Server(n.Tag)] {
++			doubtful = append(doubtful, n)
++		} else {
++			healthy = append(healthy, n)
++		}
++	}
++	return append(bestOfEachServer(healthy), bestOfEachServer(doubtful)...)
++}
++
++// bestOfEachServer puts the first outbound of each server before the
++// others and keeps the order within each part (Wanwire).
++func bestOfEachServer(nodes []*node) []*node {
++	seen := make(map[string]bool, len(nodes))
++	first := make([]*node, 0, len(nodes))
++	var rest []*node
++	for _, n := range nodes {
++		server := liveness.Server(n.Tag)
++		if seen[server] {
++			rest = append(rest, n)
++			continue
++		}
++		seen[server] = true
++		first = append(first, n)
++	}
++	return append(first, rest...)
++}
++
++// serversOf returns the servers that the outbounds dial (Wanwire).
++func serversOf(tags []string) map[string]bool {
++	servers := make(map[string]bool, len(tags))
++	for _, tag := range tags {
++		servers[liveness.Server(tag)] = true
++	}
++	return servers
++}
++
+ // selectLeastLoad selects nodes according to Baselines and Expected Count.
+ //
+ // The strategy always improves network response speed, not matter which mode below is configured.
+@@ -139,22 +222,28 @@ func (s *LeastLoadStrategy) selectLeastLoad(nodes []*node) []*node {
+ 	return nodes[:count]
+ }
+ 
+-func (s *LeastLoadStrategy) getNodes(candidates []string) []*node {
++// getNodes returns the candidates that qualify, best first, and (Wanwire)
++// the candidates that the health checks found dead.
++func (s *LeastLoadStrategy) getNodes(candidates []string) ([]*node, []string) {
+ 	if s.observer == nil {
+ 		errors.LogError(s.ctx, "observer is nil")
+-		return make([]*node, 0)
++		return make([]*node, 0), nil
+ 	}
+ 	observeResult, err := s.observer.GetObservation(s.ctx)
+ 	if err != nil {
+ 		errors.LogInfoInner(s.ctx, err, "cannot get observation")
+-		return make([]*node, 0)
++		return make([]*node, 0), nil
+ 	}
+ 
+ 	results := observeResult.(*observatory.ObservationResult)
+ 
+ 	var ret []*node
++	var dead []string
+ 
+ 	for _, v := range results.Status {
++		if !v.Alive && slices.Contains(candidates, v.OutboundTag) {
++			dead = append(dead, v.OutboundTag)
++		}
+ 		if s.shouldSelectNode(v, candidates) {
+ 			record := &node{
+ 				Tag:              v.OutboundTag,
+@@ -178,7 +267,7 @@ func (s *LeastLoadStrategy) getNodes(candidates []string) []*node {
+ 	}
+ 
+ 	leastloadSort(ret)
+-	return ret
++	return ret, dead
+ }
+ 
+ func (s *LeastLoadStrategy) shouldSelectNode(v *observatory.OutboundStatus, candidates []string) bool {
+diff --git a/app/router/strategy_leastload_demote_test.go b/app/router/strategy_leastload_demote_test.go
+new file mode 100644
+index 000000000..62f583409
+--- /dev/null
++++ b/app/router/strategy_leastload_demote_test.go
+@@ -0,0 +1,132 @@
++package router
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/app/observatory"
++	"github.com/xtls/xray-core/app/observatory/liveness"
++	"github.com/xtls/xray-core/common/buf"
++	"google.golang.org/protobuf/proto"
++)
++
++func tags(nodes []*node) []string {
++	var out []string
++	for _, n := range nodes {
++		out = append(out, n.Tag)
++	}
++	return out
++}
++
++func same(a, b []string) bool {
++	if len(a) != len(b) {
++		return false
++	}
++	for i := range a {
++		if a[i] != b[i] {
++			return false
++		}
++	}
++	return true
++}
++
++// Wanwire: the leastLoad strategy turns liveness tracking on from its
++// settings, leaves out a demoted outbound unless none would be left, and
++// tries the other outbounds of its server after those of other servers.
++func TestLeastLoadPrefersLiveOutbounds(t *testing.T) {
++	NewLeastLoadStrategy(&StrategyLeastLoadConfig{
++		Demote: &StrategyLeastLoadDemote{Failures: 2, Window: int64(time.Minute),
++			ReplyTimeout: int64(time.Minute)},
++	})
++	if !liveness.Enabled() {
++		t.Fatal("demote settings did not turn liveness tracking on")
++	}
++	liveness.SetServer("dead-h3", "192.0.2.1:443")
++	liveness.SetServer("dead-h2", "192.0.2.1:443")
++	liveness.SetServer("live", "192.0.2.2:443")
++	for i := 0; i < 2; i++ {
++		liveness.Done(liveness.Watch(context.Background(), "dead-h3", "tcp:example.com:443",
++			buf.Discard))
++	}
++	got := preferLive([]*node{{Tag: "dead-h3"}, {Tag: "dead-h2"}, {Tag: "live"}})
++	if !same(tags(got), []string{"dead-h2", "live"}) {
++		t.Fatalf("got %v, want the demoted outbound left out", tags(got))
++	}
++	if got := spreadServers(got, nil); !same(tags(got), []string{"live", "dead-h2"}) {
++		t.Fatalf("got %v, want the demoted outbound's sibling last", tags(got))
++	}
++	if got := preferLive([]*node{{Tag: "dead-h3"}}); len(got) != 1 {
++		t.Fatal("left out the only outbound there is")
++	}
++}
++
++func TestSpreadServers(t *testing.T) {
++	NewLeastLoadStrategy(&StrategyLeastLoadConfig{Demote: &StrategyLeastLoadDemote{Failures: 3}})
++	liveness.SetServer("a-h3", "192.0.2.10:443")
++	liveness.SetServer("a-h2", "192.0.2.10:443")
++	liveness.SetServer("b-r", "192.0.2.11:443")
++	got := spreadServers([]*node{{Tag: "a-h3"}, {Tag: "a-h2"}, {Tag: "b-r"}, {Tag: "new"}}, nil)
++	if want := []string{"a-h3", "b-r", "new", "a-h2"}; !same(tags(got), want) {
++		t.Fatalf("got %v, want %v", tags(got), want)
++	}
++}
++
++// Wanwire: the other transports of a server whose outbound the health checks
++// found dead come after the outbounds of the other servers, and among such
++// servers the picks still spread.
++func TestSpreadServersDeadSibling(t *testing.T) {
++	NewLeastLoadStrategy(&StrategyLeastLoadConfig{Demote: &StrategyLeastLoadDemote{Failures: 3}})
++	liveness.SetServer("d-r", "192.0.2.20:443")
++	liveness.SetServer("d-h3", "192.0.2.20:443")
++	liveness.SetServer("e-h3", "192.0.2.21:443")
++	liveness.SetServer("f-r", "192.0.2.22:443")
++	got := spreadServers([]*node{{Tag: "d-h3"}, {Tag: "e-h3"}, {Tag: "f-r"}}, serversOf([]string{"d-r"}))
++	if want := []string{"e-h3", "f-r", "d-h3"}; !same(tags(got), want) {
++		t.Fatalf("got %v, want %v", tags(got), want)
++	}
++
++	// UDP throttled: every server has a dead h3, and its REALITY and h2 still
++	// spread over the servers.
++	for _, tag := range []string{"x-h3", "x-r", "x-h2"} {
++		liveness.SetServer(tag, "192.0.2.30:443")
++	}
++	for _, tag := range []string{"y-h3", "y-r", "y-h2"} {
++		liveness.SetServer(tag, "192.0.2.31:443")
++	}
++	got = spreadServers([]*node{{Tag: "x-r"}, {Tag: "x-h2"}, {Tag: "y-r"}, {Tag: "y-h2"}},
++		serversOf([]string{"x-h3", "y-h3"}))
++	if want := []string{"x-r", "y-r", "x-h2", "y-h2"}; !same(tags(got), want) {
++		t.Fatalf("got %v, want %v", tags(got), want)
++	}
++}
++
++type fakeObservatory struct {
++	result *observatory.ObservationResult
++}
++
++func (fakeObservatory) Type() interface{} { return nil }
++func (fakeObservatory) Start() error      { return nil }
++func (fakeObservatory) Close() error      { return nil }
++func (f fakeObservatory) GetObservation(context.Context) (proto.Message, error) {
++	return f.result, nil
++}
++
++// Wanwire: getNodes reports the candidates that are dead, and leaves out the
++// dead outbounds of other balancers.
++func TestGetNodesReportsDeadCandidates(t *testing.T) {
++	s := NewLeastLoadStrategy(&StrategyLeastLoadConfig{Demote: &StrategyLeastLoadDemote{Failures: 3}})
++	s.observer = fakeObservatory{result: &observatory.ObservationResult{Status: []*observatory.OutboundStatus{
++		{OutboundTag: "a-r", Alive: false},
++		{OutboundTag: "a-h3", Alive: true, Delay: 20},
++		{OutboundTag: "b-r", Alive: true, Delay: 10},
++		{OutboundTag: "other", Alive: false},
++	}}}
++	nodes, dead := s.getNodes([]string{"a-r", "a-h3", "b-r"})
++	if !same(tags(nodes), []string{"b-r", "a-h3"}) {
++		t.Fatalf("got nodes %v", tags(nodes))
++	}
++	if !same(dead, []string{"a-r"}) {
++		t.Fatalf("got dead %v, want [a-r]", dead)
++	}
++}
+diff --git a/infra/conf/router_strategy.go b/infra/conf/router_strategy.go
+index 6c426c510..3877e3bd5 100644
+--- a/infra/conf/router_strategy.go
++++ b/infra/conf/router_strategy.go
+@@ -41,6 +41,18 @@ type strategyLeastLoadConfig struct {
+ 	MaxRTT duration.Duration `json:"maxRTT,omitempty"`
+ 	// acceptable failure rate
+ 	Tolerance float64 `json:"tolerance,omitempty"`
++	// Wanwire: prefer other outbounds over one whose connections get no
++	// replies, until its next health check result
++	Demote *strategyLeastLoadDemote `json:"demote,omitempty"`
++}
++
++// strategyLeastLoadDemote is router.StrategyLeastLoadDemote in JSON, e.g.
++// {"failures": 3, "window": "20s", "replyTimeout": "5s", "minReplyBytes": 1}
++type strategyLeastLoadDemote struct {
++	Failures      int32             `json:"failures"`
++	Window        duration.Duration `json:"window"`
++	ReplyTimeout  duration.Duration `json:"replyTimeout"`
++	MinReplyBytes int64             `json:"minReplyBytes"`
+ }
+ 
+ // healthCheckSettings holds settings for health Checker
+@@ -96,5 +108,13 @@ func (v *strategyLeastLoadConfig) Build() (proto.Message, error) {
+ 		}
+ 		config.Baselines = append(config.Baselines, int64(b))
+ 	}
++	if d := v.Demote; d != nil && d.Failures > 0 {
++		config.Demote = &router.StrategyLeastLoadDemote{
++			Failures:      d.Failures,
++			Window:        max(int64(d.Window), 0),
++			ReplyTimeout:  max(int64(d.ReplyTimeout), 0),
++			MinReplyBytes: max(d.MinReplyBytes, 0),
++		}
++	}
+ 	return config, nil
+ }
+diff --git a/infra/conf/router_strategy_demote_test.go b/infra/conf/router_strategy_demote_test.go
+new file mode 100644
+index 000000000..d19dda8c5
+--- /dev/null
++++ b/infra/conf/router_strategy_demote_test.go
+@@ -0,0 +1,47 @@
++package conf_test
++
++import (
++	"encoding/json"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/app/router"
++	. "github.com/xtls/xray-core/infra/conf"
++	"google.golang.org/protobuf/proto"
++)
++
++// Wanwire: leastLoad's "demote" settings reach router.StrategyLeastLoadDemote.
++func TestLeastLoadDemoteSettings(t *testing.T) {
++	for _, c := range []struct {
++		settings string
++		want     *router.StrategyLeastLoadDemote
++	}{
++		{`{"expected": 2, "demote": {"failures": 3, "window": "20s", "replyTimeout": "5s",
++			"minReplyBytes": 1}}`,
++			&router.StrategyLeastLoadDemote{Failures: 3, Window: int64(20 * time.Second),
++				ReplyTimeout: int64(5 * time.Second), MinReplyBytes: 1}},
++		{`{"expected": 2, "demote": {"failures": 4}}`,
++			&router.StrategyLeastLoadDemote{Failures: 4}},
++		{`{"expected": 2, "demote": {"failures": 0, "window": "20s"}}`, nil},
++		{`{"expected": 2}`, nil},
++	} {
++		config := new(RouterConfig)
++		input := `{"balancers": [{"tag": "b", "selector": ["proxy"],
++			"strategy": {"type": "leastLoad", "settings": ` + c.settings + `}}]}`
++		if err := json.Unmarshal([]byte(input), config); err != nil {
++			t.Fatal(err)
++		}
++		built, err := config.Build()
++		if err != nil {
++			t.Fatal(err)
++		}
++		instance, err := built.BalancingRule[0].StrategySettings.GetInstance()
++		if err != nil {
++			t.Fatal(err)
++		}
++		got := instance.(*router.StrategyLeastLoadConfig).GetDemote()
++		if !proto.Equal(got, c.want) {
++			t.Errorf("%s: got %v, want %v", c.settings, got, c.want)
++		}
++	}
++}
