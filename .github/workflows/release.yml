@@ -64,7 +64,8 @@ jobs:
             gomobile bind -target "$GOMOBILE_TARGETS" -iosversion="$IOS_VERSION" -macosversion="$MACOS_VERSION" -tvosversion="$TVOS_VERSION" -xrosversion="$XROS_VERSION" -x -o "$FRAMEWORK_FILENAME"
 
       - name: Archive xcframework
-        run: zip -r ${{ env.FRAMEWORK_FILENAME }}.zip ${{ env.FRAMEWORK_FILENAME }}
+        # -y keeps the symlinks of the versioned macOS and Mac Catalyst frameworks
+        run: zip -r -y ${{ env.FRAMEWORK_FILENAME }}.zip ${{ env.FRAMEWORK_FILENAME }}
 
       - name: Fix up Package.swift
         run: |
