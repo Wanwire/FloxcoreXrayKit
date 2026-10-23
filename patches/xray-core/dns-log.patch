@@ -1,8 +1,8 @@
 diff --git a/app/dispatcher/default.go b/app/dispatcher/default.go
-index 2717df5f..91611b1d 100644
+index cae9735..f87aaa9 100644
 --- a/app/dispatcher/default.go
 +++ b/app/dispatcher/default.go
-@@ -501,5 +501,6 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
+@@ -504,5 +504,6 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
  		log.Record(accessMessage)
  	}
  
@@ -11,7 +11,7 @@ index 2717df5f..91611b1d 100644
  }
 diff --git a/app/dispatcher/dnslog.go b/app/dispatcher/dnslog.go
 new file mode 100644
-index 00000000..3cd1ef2d
+index 0000000..3cd1ef2
 --- /dev/null
 +++ b/app/dispatcher/dnslog.go
 @@ -0,0 +1,267 @@
@@ -284,7 +284,7 @@ index 00000000..3cd1ef2d
 +}
 diff --git a/app/dispatcher/dnslog_test.go b/app/dispatcher/dnslog_test.go
 new file mode 100644
-index 00000000..b24e891b
+index 0000000..b24e891
 --- /dev/null
 +++ b/app/dispatcher/dnslog_test.go
 @@ -0,0 +1,167 @@
@@ -456,7 +456,7 @@ index 00000000..b24e891b
 +	}
 +}
 diff --git a/app/log/log.go b/app/log/log.go
-index 553862b1..4d31fdf6 100644
+index 4d92336..9c6d154 100644
 --- a/app/log/log.go
 +++ b/app/log/log.go
 @@ -40,6 +40,7 @@ func New(ctx context.Context, config *Config) (*Instance, error) {
@@ -468,7 +468,7 @@ index 553862b1..4d31fdf6 100644
  	// start logger now,
  	// then other modules will be able to log during initialization
 diff --git a/common/log/dns.go b/common/log/dns.go
-index 91ecdb92..48014f15 100644
+index 91ecdb9..48014f1 100644
 --- a/common/log/dns.go
 +++ b/common/log/dns.go
 @@ -3,6 +3,7 @@ package log
